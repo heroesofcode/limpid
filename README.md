@@ -32,6 +32,22 @@ nothing else does:
 - **Reversible by default.** Every destructive action is a dry run until you
   say otherwise, and goes through the XDG trash rather than `unlink`.
 
+## Theming
+
+Limpid reads the active Omarchy palette from the staged theme and follows it
+live — the resolver reproduces Omarchy's own alias and derivation cascade, and
+agrees with `omarchy-theme-color` on every colour of all 23 themes installed
+here.
+
+Off Omarchy it follows the desktop's light/dark preference through
+`org.freedesktop.appearance` and uses its own palette. With neither, it just
+looks like itself.
+
+```sh
+limpid-cli theme                      # the palette in force, and its source
+limpid-cli theme --file colors.toml   # resolve a specific theme
+```
+
 ## Safety
 
 An app that deletes files gets one chance to be wrong, so the design gives up

@@ -40,6 +40,12 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Show the palette Limpid would draw with, and where it came from.
+    Theme {
+        /// Resolve this colors.toml instead of the active theme.
+        #[arg(long, value_name = "FILE")]
+        file: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -70,6 +76,25 @@ fn main() -> Result<()> {
             } else {
                 report(&mut stdout, &scan, colour)
             }
+        }
+        Command::Theme { file } => {
+            let theme = match &file {
+                Some(path) => {
+                    let source = std::fs::read_to_string(path)?;
+                    let palette =
+                        limpid_theme::omarchy::resolve(&source, false).ok_or_else(|| {
+                            anyhow::anyhow!("no usable palette in {}", path.display())
+                        })?;
+                    limpid_theme::Theme {
+                        palette,
+                        source: limpid_theme::Source::Omarchy(None),
+                    }
+                }
+                None => limpid_theme::Theme::detect(),
+            };
+            let colour = io::stdout().is_terminal();
+            let mut stdout = io::stdout().lock();
+            show_theme(&mut stdout, &theme, colour)
         }
     };
 
@@ -186,6 +211,72 @@ fn report(out: &mut impl Write, scan: &Scan, colour: bool) -> io::Result<()> {
 
     for caveat in &scan.caveats {
         writeln!(out, "\n{}", style.dim(caveat))?;
+    }
+
+    Ok(())
+}
+
+/// Print the resolved palette, with a swatch of each colour.
+fn show_theme(out: &mut impl Write, theme: &limpid_theme::Theme, colour: bool) -> io::Result<()> {
+    use limpid_theme::Color;
+
+    let style = Style { enabled: colour };
+    let palette = &theme.palette;
+
+    writeln!(
+        out,
+        "{}",
+        style.bold(&format!("Following {}", theme.source.describe()))
+    )?;
+    writeln!(
+        out,
+        "{}",
+        style.dim(&format!(
+            "{:?} mode{}",
+            palette.mode,
+            if theme.source.is_live() {
+                ", updates live"
+            } else {
+                ""
+            },
+        )),
+    )?;
+
+    let swatch = |value: Color| {
+        if colour {
+            // Two spaces of background is enough to read the hue at a glance.
+            format!("\x1b[48;2;{};{};{}m  \x1b[0m", value.r, value.g, value.b)
+        } else {
+            String::new()
+        }
+    };
+
+    let entries: [(&str, Color); 20] = [
+        ("accent", palette.accent),
+        ("background", palette.background),
+        ("dark_background", palette.dark_background),
+        ("darker_background", palette.darker_background),
+        ("lighter_background", palette.lighter_background),
+        ("foreground", palette.foreground),
+        ("dark_foreground", palette.dark_foreground),
+        ("light_foreground", palette.light_foreground),
+        ("bright_foreground", palette.bright_foreground),
+        ("selection", palette.selection),
+        ("muted", palette.muted),
+        ("red", palette.red),
+        ("yellow", palette.yellow),
+        ("orange", palette.orange),
+        ("green", palette.green),
+        ("cyan", palette.cyan),
+        ("blue", palette.blue),
+        ("magenta", palette.magenta),
+        ("brown", palette.brown),
+        ("bright_red", palette.bright_red),
+    ];
+
+    writeln!(out)?;
+    for (name, value) in entries {
+        writeln!(out, "  {} {:<19} {value}", swatch(value), name)?;
     }
 
     Ok(())
