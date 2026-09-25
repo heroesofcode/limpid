@@ -12,8 +12,10 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use limpid_core::catalog::{self, Context};
+use limpid_core::execute::{Executor, Outcome, Problem};
 use limpid_core::model::{Risk, Scan};
 use limpid_core::paths::{ROOT_OVERRIDE, Roots};
+use limpid_core::plan::{Plan, Selection};
 use limpid_core::size::human;
 
 #[derive(Parser)]
@@ -32,6 +34,27 @@ struct Cli {
     command: Command,
 }
 
+/// Risk levels, as a command-line value.
+#[derive(Debug, Clone, Copy, clap::ValueEnum)]
+enum RiskArg {
+    /// Only what regenerates itself with no consequence.
+    Safe,
+    /// Also what costs a re-download or a slow first launch.
+    Review,
+    /// Also what could lose something. Rarely what you want.
+    Sensitive,
+}
+
+impl From<RiskArg> for Risk {
+    fn from(argument: RiskArg) -> Self {
+        match argument {
+            RiskArg::Safe => Self::Safe,
+            RiskArg::Review => Self::Review,
+            RiskArg::Sensitive => Self::Sensitive,
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum Command {
     /// Look for reclaimable space without changing anything.
@@ -39,6 +62,16 @@ enum Command {
         /// Print machine-readable output.
         #[arg(long)]
         json: bool,
+    },
+    /// Remove what a scan found. Reports without changing anything unless
+    /// told to apply.
+    Clean {
+        /// Actually remove things. Without this, nothing is touched.
+        #[arg(long)]
+        apply: bool,
+        /// The highest risk level to include.
+        #[arg(long, value_enum, default_value = "safe")]
+        risk: RiskArg,
     },
     /// Show the palette Limpid would draw with, and where it came from.
     Theme {
@@ -76,6 +109,30 @@ fn main() -> Result<()> {
             } else {
                 report(&mut stdout, &scan, colour)
             }
+        }
+        Command::Clean { apply, risk } => {
+            let scan = catalog::scan(&context);
+            let selection = Selection {
+                up_to: risk.into(),
+                include_privileged: false,
+            };
+            let plan = Plan::from_targets(
+                scan.categories
+                    .iter()
+                    .flat_map(|category| &category.targets)
+                    .filter(|target| selection.includes(target)),
+            );
+
+            let executor = if apply {
+                Executor::applying(&context.roots)
+            } else {
+                Executor::dry_run(&context.roots)
+            };
+            let outcome = executor.run(&plan);
+
+            let colour = io::stdout().is_terminal();
+            let mut stdout = io::stdout().lock();
+            report_clean(&mut stdout, &plan, &outcome, colour)
         }
         Command::Theme { file } => {
             let theme = match &file {
@@ -211,6 +268,60 @@ fn report(out: &mut impl Write, scan: &Scan, colour: bool) -> io::Result<()> {
 
     for caveat in &scan.caveats {
         writeln!(out, "\n{}", style.dim(caveat))?;
+    }
+
+    Ok(())
+}
+
+/// Print what a clean did, or would do.
+fn report_clean(
+    out: &mut impl Write,
+    plan: &Plan,
+    outcome: &Outcome,
+    colour: bool,
+) -> io::Result<()> {
+    let style = Style { enabled: colour };
+
+    if plan.is_empty() {
+        writeln!(out, "Nothing selected.")?;
+        return Ok(());
+    }
+
+    for item in &plan.items {
+        writeln!(
+            out,
+            "  {:>9}  {}  {}",
+            human(item.expected.on_disk),
+            item.name,
+            style.dim(item.disposal.describe()),
+        )?;
+    }
+
+    writeln!(out)?;
+    if outcome.applied {
+        writeln!(
+            out,
+            "{} {} in {} files.",
+            style.bold("Reclaimed"),
+            human(outcome.reclaimed.on_disk),
+            outcome.files,
+        )?;
+    } else {
+        writeln!(
+            out,
+            "{} {} in {} files. Nothing was changed; pass --apply to do it.",
+            style.bold("Would reclaim"),
+            human(outcome.reclaimed.on_disk),
+            outcome.files,
+        )?;
+    }
+
+    for problem in &outcome.problems {
+        let label = match problem {
+            Problem::Refused(_) => "refused",
+            Problem::Failed { .. } => "failed",
+        };
+        writeln!(out, "{} {problem}", style.paint("31", label))?;
     }
 
     Ok(())

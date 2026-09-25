@@ -18,6 +18,7 @@ ignore = "0.4"
 rayon = "1.11"
 dirs = "7.0"
 rustix = { version = "1.1", features = ["fs"] }
+trash = "5.2"
 
 [dev-dependencies]
 tempfile = "3.24"

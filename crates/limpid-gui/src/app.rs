@@ -1,12 +1,16 @@
 //! Application state and the top-level view.
 
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use iced::widget::{Space, column, container, row, scrollable, text};
 use iced::{Element, Length, Subscription, Task};
 
 use limpid_core::catalog::{self, Context};
-use limpid_core::model::Scan;
+use limpid_core::execute::{Executor, Outcome};
+use limpid_core::model::{Scan, Target};
+use limpid_core::paths::Roots;
+use limpid_core::plan::{Plan, Selection};
 use limpid_theme::{Palette, Source, Theme as LimpidTheme};
 
 use crate::style;
@@ -55,6 +59,11 @@ pub enum Progress {
     Done(Box<Scan>),
 }
 
+/// Which finding a checkbox belongs to: the category's position, then the
+/// target's within it. Names are not unique across categories, and indices
+/// are stable for as long as a given scan is on screen.
+pub type TargetId = (usize, usize);
+
 /// Everything the window shows.
 pub struct State {
     /// The colours in force, and where they came from.
@@ -63,6 +72,14 @@ pub struct State {
     page: Page,
     /// The scan.
     progress: Progress,
+    /// What the user has ticked.
+    selected: BTreeSet<TargetId>,
+    /// Whether the confirmation is up.
+    confirming: bool,
+    /// Whether a clean is under way.
+    cleaning: bool,
+    /// What the last clean did.
+    outcome: Option<Outcome>,
 }
 
 /// Everything that can happen.
@@ -76,6 +93,20 @@ pub enum Message {
     ScanFinished(Box<Scan>),
     /// The desktop theme changed underneath us.
     PaletteChanged(Box<Palette>),
+    /// A finding was ticked or unticked.
+    Toggle(TargetId),
+    /// Tick everything that regenerates itself with no consequence.
+    SelectSafe,
+    /// Untick everything.
+    SelectNone,
+    /// The clean button was pressed; show what is about to happen.
+    AskToClean,
+    /// The confirmation was dismissed.
+    Cancel,
+    /// The confirmation was accepted.
+    Clean,
+    /// The clean finished.
+    Cleaned(Box<Outcome>),
 }
 
 impl State {
@@ -88,6 +119,10 @@ impl State {
             theme: LimpidTheme::detect(),
             page: Page::Overview,
             progress: Progress::Idle,
+            selected: BTreeSet::new(),
+            confirming: false,
+            cleaning: false,
+            outcome: None,
         };
         (state, Task::done(Message::StartScan))
     }
@@ -100,6 +135,80 @@ impl State {
     /// Where the colours came from.
     pub fn source(&self) -> &Source {
         &self.theme.source
+    }
+
+    /// Whether a finding is ticked.
+    pub fn is_selected(&self, id: TargetId) -> bool {
+        self.selected.contains(&id)
+    }
+
+    /// Whether the confirmation is up.
+    pub fn is_confirming(&self) -> bool {
+        self.confirming
+    }
+
+    /// Whether a clean is under way.
+    pub fn is_cleaning(&self) -> bool {
+        self.cleaning
+    }
+
+    /// What the last clean did, if there was one.
+    pub fn outcome(&self) -> Option<&Outcome> {
+        self.outcome.as_ref()
+    }
+
+    /// How the scan is going.
+    pub fn progress(&self) -> &Progress {
+        &self.progress
+    }
+
+    /// The scan on screen, if there is one.
+    fn scan(&self) -> Option<&Scan> {
+        match &self.progress {
+            Progress::Done(scan) => Some(scan),
+            _ => None,
+        }
+    }
+
+    /// The findings the user has ticked.
+    pub fn chosen(&self) -> Vec<&Target> {
+        let Some(scan) = self.scan() else {
+            return Vec::new();
+        };
+        self.selected
+            .iter()
+            .filter_map(|&(category, target)| scan.categories.get(category)?.targets.get(target))
+            .collect()
+    }
+
+    /// What acting on the current selection would do.
+    pub fn plan(&self) -> Plan {
+        Plan::from_targets(self.chosen())
+    }
+
+    /// Tick everything that regenerates itself with no consequence.
+    ///
+    /// The starting point after every scan: it is the selection a careful
+    /// person would arrive at, and it is never the dangerous one.
+    fn select_safe(&mut self) {
+        self.selected.clear();
+        let Some(scan) = self.scan() else {
+            return;
+        };
+        let safe = Selection::SAFE;
+        self.selected = scan
+            .categories
+            .iter()
+            .enumerate()
+            .flat_map(|(c, category)| {
+                category
+                    .targets
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, target)| safe.includes(target) && !target.size.is_zero())
+                    .map(move |(t, _)| (c, t))
+            })
+            .collect();
     }
 
     /// The Iced theme, which sets the window background.
@@ -137,7 +246,58 @@ impl State {
             }
             Message::ScanFinished(scan) => {
                 self.progress = Progress::Done(scan);
+                self.cleaning = false;
+                self.select_safe();
                 Task::none()
+            }
+            Message::Toggle(id) => {
+                if !self.selected.remove(&id) {
+                    self.selected.insert(id);
+                }
+                Task::none()
+            }
+            Message::SelectSafe => {
+                self.select_safe();
+                Task::none()
+            }
+            Message::SelectNone => {
+                self.selected.clear();
+                Task::none()
+            }
+            Message::AskToClean => {
+                // Nothing selected is not a question worth asking.
+                self.confirming = !self.plan().is_empty();
+                Task::none()
+            }
+            Message::Cancel => {
+                self.confirming = false;
+                Task::none()
+            }
+            Message::Clean => {
+                let plan = self.plan();
+                if plan.is_empty() {
+                    self.confirming = false;
+                    return Task::none();
+                }
+                self.confirming = false;
+                self.cleaning = true;
+                self.outcome = None;
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            Executor::applying(&Roots::from_env()).run(&plan)
+                        })
+                        .await
+                        .unwrap_or_default()
+                    },
+                    |outcome| Message::Cleaned(Box::new(outcome)),
+                )
+            }
+            Message::Cleaned(outcome) => {
+                self.outcome = Some(*outcome);
+                // Rescan rather than adjust the numbers in place: what was
+                // actually reclaimed is a measurement, not an assumption.
+                Task::done(Message::StartScan)
             }
             Message::PaletteChanged(palette) => {
                 self.theme.palette = *palette;
@@ -151,7 +311,7 @@ impl State {
         let palette = self.palette();
 
         let body = match self.page {
-            Page::Overview => view::overview::view(palette, &self.progress),
+            Page::Overview => view::overview::view(palette, self),
             Page::Settings => view::settings::view(palette, &self.theme),
         };
 
@@ -295,6 +455,139 @@ mod tests {
             state.iced_theme().palette().background,
             style::to_iced(light.background)
         );
+    }
+
+    /// A scan with one of each interesting shape.
+    fn sample_scan() -> Scan {
+        use limpid_core::model::{Category, Kind, Risk};
+        use limpid_core::size::Size;
+
+        let sized =
+            |name: &str, kind, risk| Target::new(name, kind, risk).measured(Size::new(100, 100), 1);
+
+        let mut category = Category::new("Caches", "");
+        category.targets = vec![
+            sized("safe", Kind::Cache, Risk::Safe),
+            sized("review", Kind::Cache, Risk::Review),
+            sized("privileged", Kind::Cache, Risk::Safe).requires_root(),
+            Target::new("empty", Kind::Cache, Risk::Safe),
+            Target::new("pacnew", Kind::Attention, Risk::Sensitive),
+        ];
+
+        Scan {
+            categories: vec![category],
+            ..Scan::default()
+        }
+    }
+
+    fn state_with_scan() -> State {
+        let (mut state, _) = State::boot();
+        let _ = state.update(Message::ScanFinished(Box::new(sample_scan())));
+        state
+    }
+
+    #[test]
+    fn a_scan_arrives_with_only_the_uncontroversial_items_ticked() {
+        let state = state_with_scan();
+
+        assert!(state.is_selected((0, 0)), "the safe one should be ticked");
+        assert!(!state.is_selected((0, 1)), "review needs a decision");
+        assert!(!state.is_selected((0, 2)), "this process cannot act on it");
+        assert!(!state.is_selected((0, 3)), "nothing to reclaim");
+        assert!(!state.is_selected((0, 4)), "not reclaimable space at all");
+    }
+
+    #[test]
+    fn ticking_is_a_toggle() {
+        let mut state = state_with_scan();
+
+        let _ = state.update(Message::Toggle((0, 1)));
+        assert!(state.is_selected((0, 1)));
+
+        let _ = state.update(Message::Toggle((0, 1)));
+        assert!(!state.is_selected((0, 1)));
+    }
+
+    #[test]
+    fn the_plan_follows_the_selection() {
+        let mut state = state_with_scan();
+        assert_eq!(state.plan().items.len(), 1);
+
+        let _ = state.update(Message::Toggle((0, 1)));
+        assert_eq!(state.plan().items.len(), 2);
+        assert_eq!(state.plan().expected().on_disk, 200);
+
+        let _ = state.update(Message::SelectNone);
+        assert!(state.plan().is_empty());
+    }
+
+    #[test]
+    fn a_selection_that_would_do_nothing_does_not_raise_a_confirmation() {
+        let mut state = state_with_scan();
+        let _ = state.update(Message::SelectNone);
+
+        let _ = state.update(Message::AskToClean);
+
+        assert!(!state.is_confirming());
+    }
+
+    #[test]
+    fn confirming_can_be_backed_out_of() {
+        let mut state = state_with_scan();
+
+        let _ = state.update(Message::AskToClean);
+        assert!(state.is_confirming());
+
+        let _ = state.update(Message::Cancel);
+        assert!(!state.is_confirming());
+        assert!(!state.is_cleaning());
+    }
+
+    #[test]
+    fn accepting_the_confirmation_closes_it_and_starts_work() {
+        let mut state = state_with_scan();
+        let _ = state.update(Message::AskToClean);
+
+        let task = state.update(Message::Clean);
+
+        assert!(!state.is_confirming());
+        assert!(state.is_cleaning());
+        drop(task);
+    }
+
+    #[test]
+    fn accepting_with_nothing_chosen_starts_nothing() {
+        let mut state = state_with_scan();
+        let _ = state.update(Message::SelectNone);
+
+        let task = state.update(Message::Clean);
+
+        assert!(!state.is_cleaning());
+        drop(task);
+    }
+
+    #[test]
+    fn selecting_safe_again_restores_the_starting_point() {
+        let mut state = state_with_scan();
+        let _ = state.update(Message::Toggle((0, 1)));
+        let _ = state.update(Message::Toggle((0, 0)));
+
+        let _ = state.update(Message::SelectSafe);
+
+        assert!(state.is_selected((0, 0)));
+        assert!(!state.is_selected((0, 1)));
+    }
+
+    #[test]
+    fn a_finished_clean_is_reported_and_triggers_a_fresh_measurement() {
+        let mut state = state_with_scan();
+
+        let _ = state.update(Message::Cleaned(Box::default()));
+
+        assert!(state.outcome().is_some());
+        // The figure shown afterwards is measured again rather than assumed.
+        let _ = state.update(Message::ScanFinished(Box::new(sample_scan())));
+        assert!(!state.is_cleaning());
     }
 
     #[test]

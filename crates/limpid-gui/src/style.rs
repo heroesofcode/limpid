@@ -7,7 +7,7 @@
 //! `Palette` is `Copy`, which makes that cheap enough to do per widget.
 
 use iced::border::Radius;
-use iced::widget::{button, container, rule, scrollable, text};
+use iced::widget::{button, checkbox, container, rule, scrollable, text};
 use iced::{Background, Border, Color as IcedColor, Shadow, Theme, Vector};
 
 use limpid_theme::{Color, Mode, Palette};
@@ -169,6 +169,83 @@ pub fn primary_button(palette: Palette) -> impl Fn(&Theme, button::Status) -> bu
                 radius: Radius::from(CONTROL_RADIUS),
             },
             ..button::Style::default()
+        }
+    }
+}
+
+/// A secondary action: outlined, so it never competes with the primary one.
+pub fn quiet_button(palette: Palette) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let (background, border) = match status {
+            button::Status::Hovered => (faded(palette.selection, 1.0), faded(palette.accent, 0.5)),
+            button::Status::Pressed => (faded(palette.selection, 1.0), to_iced(palette.accent)),
+            _ => (IcedColor::TRANSPARENT, faded(palette.muted, 0.5)),
+        };
+        button::Style {
+            background: Some(Background::Color(background)),
+            text_color: to_iced(palette.foreground),
+            border: Border {
+                color: border,
+                width: 1.0,
+                radius: Radius::from(CONTROL_RADIUS),
+            },
+            ..button::Style::default()
+        }
+    }
+}
+
+/// The button that actually removes things.
+///
+/// Red, and only ever on the confirmation — a destructive action should not
+/// be reachable in one click from the screen you land on.
+pub fn danger_button(palette: Palette) -> impl Fn(&Theme, button::Status) -> button::Style {
+    move |_, status| {
+        let base = match status {
+            button::Status::Hovered => palette.red.mix(Color::WHITE, 0.12),
+            button::Status::Pressed => palette.red.mix(Color::BLACK, 0.12),
+            _ => palette.red,
+        };
+        button::Style {
+            background: Some(Background::Color(to_iced(base))),
+            text_color: to_iced(palette.on(base)),
+            border: Border {
+                color: IcedColor::TRANSPARENT,
+                width: 0.0,
+                radius: Radius::from(CONTROL_RADIUS),
+            },
+            ..button::Style::default()
+        }
+    }
+}
+
+/// A checkbox.
+pub fn tick(palette: Palette) -> impl Fn(&Theme, checkbox::Status) -> checkbox::Style {
+    move |_, status| {
+        let checked = matches!(
+            status,
+            checkbox::Status::Active { is_checked: true }
+                | checkbox::Status::Hovered { is_checked: true }
+                | checkbox::Status::Disabled { is_checked: true }
+        );
+        let hovered = matches!(status, checkbox::Status::Hovered { .. });
+
+        checkbox::Style {
+            background: Background::Color(if checked {
+                to_iced(palette.accent)
+            } else {
+                faded(palette.muted, if hovered { 0.35 } else { 0.18 })
+            }),
+            icon_color: to_iced(palette.on(palette.accent)),
+            border: Border {
+                color: if checked {
+                    to_iced(palette.accent)
+                } else {
+                    faded(palette.muted, 0.6)
+                },
+                width: 1.0,
+                radius: Radius::from(5.0),
+            },
+            text_color: None,
         }
     }
 }

@@ -26,8 +26,11 @@
 #![warn(missing_docs)]
 
 pub mod catalog;
+pub mod execute;
+pub mod guard;
 pub mod model;
 pub mod paths;
+pub mod plan;
 pub mod size;
 pub mod volume;
 pub mod walk;
