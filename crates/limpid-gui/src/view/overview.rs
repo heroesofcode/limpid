@@ -3,14 +3,15 @@
 //! One number dominates, because there is only one question. Everything else
 //! on the page explains where that number came from.
 
-use iced::widget::{Space, button, column, container, responsive, row, text};
+use iced::widget::{Space, button, checkbox, column, container, responsive, row, text};
 use iced::{Alignment, Element, Length};
 
+use limpid_core::execute::Outcome;
 use limpid_core::model::{Category, Risk, Scan, Target};
 use limpid_core::size::human;
 use limpid_theme::{Color, Palette};
 
-use crate::app::{Message, Progress, placeholder};
+use crate::app::{Message, Progress, State, TargetId, placeholder};
 use crate::style;
 use crate::typography as ty;
 use crate::widget::gauge::{Bar, Gauge};
@@ -33,17 +34,30 @@ fn hue(palette: Palette, index: usize) -> Color {
 }
 
 /// Draw the overview.
-pub fn view<'a>(palette: Palette, progress: &'a Progress) -> Element<'a, Message> {
-    match progress {
+pub fn view<'a>(palette: Palette, state: &'a State) -> Element<'a, Message> {
+    if state.is_cleaning() {
+        return placeholder(palette, "Cleaning\u{2026}");
+    }
+    match state.progress() {
         Progress::Idle => placeholder(palette, "Ready to look."),
         Progress::Running => placeholder(palette, "Looking through your disk\u{2026}"),
-        Progress::Done(scan) => found(palette, scan),
+        Progress::Done(scan) => found(palette, state, scan),
     }
 }
 
 /// The page once there is something to show.
-fn found<'a>(palette: Palette, scan: &'a Scan) -> Element<'a, Message> {
+fn found<'a>(palette: Palette, state: &'a State, scan: &'a Scan) -> Element<'a, Message> {
     let mut body = column![hero(palette, scan)].spacing(ty::GAP);
+
+    if let Some(outcome) = state.outcome() {
+        body = body.push(result(palette, outcome));
+    }
+
+    if state.is_confirming() {
+        body = body.push(confirmation(palette, state));
+    } else {
+        body = body.push(action_bar(palette, state));
+    }
 
     let largest = scan
         .categories
@@ -52,6 +66,8 @@ fn found<'a>(palette: Palette, scan: &'a Scan) -> Element<'a, Message> {
     for (index, category) in scan.categories.iter().enumerate() {
         body = body.push(category_card(
             palette,
+            state,
+            index,
             category,
             largest,
             hue(palette, index),
@@ -170,9 +186,155 @@ fn stat<'a>(palette: Palette, label: &'a str, value: String) -> Element<'a, Mess
     .into()
 }
 
+/// The strip that says what is selected and offers to act on it.
+fn action_bar<'a>(palette: Palette, state: &'a State) -> Element<'a, Message> {
+    let plan = state.plan();
+    let count = plan.items.len();
+    let summary = if count == 0 {
+        "Nothing selected".to_owned()
+    } else {
+        format!(
+            "{count} selected, {} to reclaim",
+            human(plan.expected().on_disk)
+        )
+    };
+
+    let mut clean = button(text("Clean").size(ty::BODY))
+        .style(style::primary_button(palette))
+        .padding([10, 22]);
+    if count > 0 {
+        clean = clean.on_press(Message::AskToClean);
+    }
+
+    container(
+        row![
+            text(summary)
+                .size(ty::BODY)
+                .style(style::body(palette))
+                .width(Length::Fill),
+            button(text("Safe only").size(ty::BODY_SMALL))
+                .style(style::quiet_button(palette))
+                .padding([8, 14])
+                .on_press(Message::SelectSafe),
+            button(text("None").size(ty::BODY_SMALL))
+                .style(style::quiet_button(palette))
+                .padding([8, 14])
+                .on_press(Message::SelectNone),
+            clean,
+        ]
+        .spacing(ty::GAP_TIGHT)
+        .align_y(Alignment::Center),
+    )
+    .style(style::card(palette))
+    .padding(ty::GAP)
+    .width(Length::Fill)
+    .into()
+}
+
+/// The last chance to say no.
+///
+/// A destructive action should not be one click away from the screen you
+/// land on, and the wording has to be honest about whether it can be undone.
+fn confirmation<'a>(palette: Palette, state: &'a State) -> Element<'a, Message> {
+    let plan = state.plan();
+
+    let mut lines = column![].spacing(4);
+    for item in &plan.items {
+        lines = lines.push(row![
+            text(item.name.clone())
+                .size(ty::BODY_SMALL)
+                .style(style::body(palette))
+                .width(Length::Fill),
+            text(human(item.expected.on_disk))
+                .size(ty::BODY_SMALL)
+                .style(style::secondary(palette)),
+        ]);
+    }
+
+    let warning = if plan.has_permanent_deletions() {
+        "This cannot be undone. Caches are removed outright rather than sent to the \
+         trash, because moving them there would not free any space."
+    } else {
+        "Everything here goes to the trash and can be put back."
+    };
+
+    container(
+        column![
+            text(format!("Remove {}?", human(plan.expected().on_disk)))
+                .size(ty::TITLE)
+                .style(style::heading(palette)),
+            text(warning)
+                .size(ty::BODY_SMALL)
+                .style(style::secondary(palette)),
+            Space::new().height(Length::Fixed(ty::GAP_TIGHT)),
+            lines,
+            Space::new().height(Length::Fixed(ty::GAP)),
+            row![
+                Space::new().width(Length::Fill),
+                button(text("Cancel").size(ty::BODY))
+                    .style(style::quiet_button(palette))
+                    .padding([10, 18])
+                    .on_press(Message::Cancel),
+                button(text("Remove").size(ty::BODY))
+                    .style(style::danger_button(palette))
+                    .padding([10, 22])
+                    .on_press(Message::Clean),
+            ]
+            .spacing(ty::GAP_TIGHT),
+        ]
+        .spacing(4),
+    )
+    .style(style::card(palette))
+    .padding(ty::GAP_WIDE)
+    .width(Length::Fill)
+    .into()
+}
+
+/// What the last clean did.
+fn result<'a>(palette: Palette, outcome: &'a Outcome) -> Element<'a, Message> {
+    let headline = format!(
+        "Reclaimed {} across {} files.",
+        human(outcome.reclaimed.on_disk),
+        outcome.files
+    );
+
+    let mut body = column![
+        row![
+            text("\u{2713}")
+                .size(ty::BODY)
+                .style(style::tinted(palette.green)),
+            text(headline).size(ty::BODY).style(style::body(palette)),
+        ]
+        .spacing(ty::GAP_TIGHT),
+    ]
+    .spacing(6);
+
+    for problem in &outcome.problems {
+        body = body.push(
+            row![
+                text("\u{2717}")
+                    .size(ty::BODY_SMALL)
+                    .style(style::tinted(palette.red)),
+                text(problem.to_string())
+                    .size(ty::CAPTION)
+                    .style(style::secondary(palette)),
+            ]
+            .spacing(ty::GAP_TIGHT),
+        );
+    }
+
+    container(body)
+        .style(style::well(palette))
+        .padding(ty::GAP)
+        .width(Length::Fill)
+        .into()
+}
+
 /// One group of findings.
 fn category_card<'a>(
     palette: Palette,
+    state: &'a State,
+    index: usize,
     category: &'a Category,
     largest: u64,
     hue: Color,
@@ -205,8 +367,8 @@ fn category_card<'a>(
     .align_y(Alignment::Start);
 
     let mut rows = column![].spacing(2);
-    for target in &category.targets {
-        rows = rows.push(target_row(palette, target));
+    for (position, target) in category.targets.iter().enumerate() {
+        rows = rows.push(target_row(palette, state, (index, position), target));
     }
 
     container(
@@ -225,7 +387,12 @@ fn category_card<'a>(
 }
 
 /// One finding.
-fn target_row<'a>(palette: Palette, target: &'a Target) -> Element<'a, Message> {
+fn target_row<'a>(
+    palette: Palette,
+    state: &'a State,
+    id: TargetId,
+    target: &'a Target,
+) -> Element<'a, Message> {
     let size = if target.size.is_zero() {
         text("\u{2014}")
             .size(ty::BODY_SMALL)
@@ -255,8 +422,25 @@ fn target_row<'a>(palette: Palette, target: &'a Target) -> Element<'a, Message> 
         ));
     }
 
+    // Nothing to tick for an item that is only a note, or one this process
+    // could not act on even if asked.
+    let selectable = target.kind != limpid_core::model::Kind::Attention
+        && !target.requires_root
+        && !target.size.is_zero();
+
+    let tick: Element<'a, Message> = if selectable {
+        checkbox(state.is_selected(id))
+            .size(16)
+            .style(style::tick(palette))
+            .on_toggle(move |_| Message::Toggle(id))
+            .into()
+    } else {
+        Space::new().width(Length::Fixed(22.0)).into()
+    };
+
     container(
         row![
+            tick,
             column![
                 labels,
                 text(target.detail.as_str())

@@ -52,6 +52,22 @@ limpid-cli theme                      # the palette in force, and its source
 limpid-cli theme --file colors.toml   # resolve a specific theme
 ```
 
+## Using it
+
+```sh
+limpid                       # the application
+limpid-cli scan              # what is there
+limpid-cli scan --json       # the same, for a script
+limpid-cli clean             # what would go, changing nothing
+limpid-cli clean --apply     # actually do it
+limpid-cli clean --risk review --apply
+```
+
+Both front-ends take `--root`, which points the whole engine at a directory
+instead of the real filesystem. That is how the test suite runs, and it is a
+reasonable way to satisfy yourself about what Limpid does before letting it
+near your home directory.
+
 ## Safety
 
 An app that deletes files gets one chance to be wrong, so the design gives up
@@ -59,8 +75,19 @@ some capability for it:
 
 - **Dry run is the default.** You see the exact list, with real byte counts,
   before anything moves.
-- **Trash first.** Deletions go to the freedesktop trash; permanent removal is
-  a separate, explicit opt-in.
+- **Removal matches what is being removed.** Caches, build output and package
+  archives are deleted outright, because sending a cache to the trash would
+  move the bytes to another directory on the same filesystem, free nothing,
+  and fill the one place you look to recover things. Anything a person rather
+  than a program would have to recreate goes to the freedesktop trash instead.
+  Either way the confirmation says which, in those words.
+- **Directories are emptied, not removed.** Applications expect their cache
+  directory to exist and misbehave quietly when it does not.
+- **A second opinion before every removal.** A path is acted on only if it
+  sits strictly inside a short list of known directories, is not one of those
+  directories itself, contains no `..`, and is not a symlink — checked against
+  the filesystem as it is at that moment, not as it was when the plan was
+  made. A bug in a scanner should cost a refusal, not a home directory.
 - **Split privilege.** The UI never runs as root. System-level cleaning goes
   through a small, auditable helper invoked via polkit, which refuses any path
   outside a compiled-in allowlist.
@@ -74,11 +101,11 @@ some capability for it:
 
 | Phase | Scope |
 |---|---|
-| 0 | Foundation: workspace, CI, releases |
-| 1 | Scanning engine and headless CLI |
-| 2 | Theme: Omarchy palette, live reload, standalone fallback |
-| 3 | The application shell |
-| 4 | Safe cleaning: dry run, trash, protected paths |
+| 0 | Foundation: workspace, CI, releases ✓ |
+| 1 | Scanning engine and headless CLI ✓ |
+| 2 | Theme: Omarchy palette, live reload, standalone fallback ✓ |
+| 3 | The application shell ✓ |
+| 4 | Safe cleaning: dry run, trash, protected paths ✓ |
 | 5 | Browsers: Chromium family and Firefox |
 | 6 | Space analyser: treemap, largest items, duplicates |
 | 7 | Privileged targets: pacman, journald, coredumps, Docker |
