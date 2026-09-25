@@ -89,6 +89,13 @@ pub struct Target {
     pub risk: Risk,
     /// Whether removing it needs privileges the app does not have.
     pub requires_root: bool,
+    /// The privileged operation that cleans this, if one does.
+    ///
+    /// A target that needs elevation is not cleaned by removing its paths —
+    /// the helper is asked to carry out a named operation instead, and no
+    /// path crosses that boundary. See [`crate::privileged`].
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub privileged: Option<crate::privileged::Operation>,
     /// Why this cannot be acted on right now, if it cannot.
     ///
     /// Distinct from risk. A risky target is one the user may choose; a
@@ -109,6 +116,7 @@ impl Target {
             kind,
             risk,
             requires_root: false,
+            privileged: None,
             blocked: None,
         }
     }
@@ -131,6 +139,14 @@ impl Target {
     #[must_use]
     pub fn requires_root(mut self) -> Self {
         self.requires_root = true;
+        self
+    }
+
+    /// Mark this as needing elevation, and say how the helper cleans it.
+    #[must_use]
+    pub fn by_operation(mut self, operation: crate::privileged::Operation) -> Self {
+        self.requires_root = true;
+        self.privileged = Some(operation);
         self
     }
 

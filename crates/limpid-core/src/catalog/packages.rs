@@ -7,6 +7,13 @@
 
 use super::Context;
 use crate::model::{Category, Kind, Risk, Target};
+use crate::privileged::Operation;
+
+/// Package versions kept when the cache is trimmed.
+///
+/// `paccache`'s own default. Three is enough to get back past a bad update
+/// without the cache being most of what it was.
+const KEEP_VERSIONS: u8 = 3;
 
 /// Measure package manager caches.
 pub fn scan(context: &Context) -> Category {
@@ -24,7 +31,9 @@ pub fn scan(context: &Context) -> Category {
                  trims rather than empties it.",
             )
             .path(roots.system("/var/cache/pacman/pkg"))
-            .requires_root(),
+            .by_operation(Operation::TrimPackageCache {
+                keep: KEEP_VERSIONS,
+            }),
     );
 
     // yay keeps the upstream tarball and the extracted build tree per package;

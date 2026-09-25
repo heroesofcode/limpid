@@ -7,6 +7,13 @@
 
 use super::Context;
 use crate::model::{Category, Kind, Risk, Target};
+use crate::privileged::Operation;
+
+/// Journal history kept when it is trimmed.
+///
+/// Two weeks is about the shortest window that still answers "what changed
+/// before this started happening", which is most of what a journal is for.
+const KEEP_DAYS: u16 = 14;
 
 /// Measure the journal and the coredump store.
 pub fn scan(context: &Context) -> Category {
@@ -19,12 +26,12 @@ pub fn scan(context: &Context) -> Category {
     category.targets.push(
         Target::new("System journal", Kind::Log, Risk::Review)
             .detail(
-                "Everything systemd has logged. Trimming it is safe for the running \
-                 system and costs you the history you would need to debug whatever \
-                 breaks next.",
+                "Everything systemd has logged. Trimming to the last fourteen days is safe \
+                 for the running system; what it costs is the history you would want \
+                 the next time something breaks.",
             )
             .path(roots.system("/var/log/journal"))
-            .requires_root(),
+            .by_operation(Operation::VacuumJournal { days: KEEP_DAYS }),
     );
 
     category.targets.push(
@@ -34,7 +41,7 @@ pub fn scan(context: &Context) -> Category {
                  these on a timer; removing one means no backtrace for that crash.",
             )
             .path(roots.system("/var/lib/systemd/coredump"))
-            .requires_root(),
+            .by_operation(Operation::RemoveCoredumps),
     );
 
     context.measure_all(category)
@@ -44,6 +51,21 @@ pub fn scan(context: &Context) -> Category {
 mod tests {
     use super::*;
     use crate::paths::Roots;
+
+    #[test]
+    fn each_privileged_target_says_how_it_is_cleaned() {
+        let fixture = tempfile::tempdir().unwrap();
+        let category = scan(&Context::with_roots(Roots::under(fixture.path())));
+
+        for target in &category.targets {
+            assert!(target.requires_root);
+            assert!(
+                target.privileged.is_some(),
+                "{} needs elevation but names no operation",
+                target.name,
+            );
+        }
+    }
 
     #[test]
     fn the_journal_is_measured_and_needs_elevation() {

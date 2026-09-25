@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 
 use crate::model::{Kind, Risk, Target};
+use crate::privileged::Operation;
 use crate::size::Size;
 
 /// How a target should be got rid of.
@@ -69,8 +70,16 @@ pub struct Item {
 /// Everything to be done, in one go.
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct Plan {
-    /// The items, in the order they will be acted on.
+    /// The items this process removes itself.
     pub items: Vec<Item>,
+    /// Operations the privileged helper is asked to carry out.
+    ///
+    /// Kept apart from the items because they are a different kind of
+    /// thing: an item is a set of paths, an operation is a named policy with
+    /// no paths in it at all.
+    pub operations: Vec<Operation>,
+    /// What the operations are expected to reclaim.
+    pub operations_expected: Size,
 }
 
 impl Plan {
@@ -87,27 +96,47 @@ impl Plan {
     /// privileged helper, and letting it reach this executor would only
     /// produce a permission error per file.
     pub fn from_targets<'a>(targets: impl IntoIterator<Item = &'a Target>) -> Self {
-        let items = targets
-            .into_iter()
-            .filter(|target| target.is_actionable())
-            .map(|target| Item {
-                name: target.name.clone(),
-                paths: target.paths.clone(),
-                disposal: Disposal::for_kind(target.kind),
-                expected: target.size,
-            })
-            .collect();
-        Self { items }
+        let mut plan = Self::default();
+
+        for target in targets {
+            if target.blocked.is_some() || target.kind == Kind::Attention {
+                continue;
+            }
+
+            match target.privileged {
+                Some(operation) => {
+                    plan.operations.push(operation);
+                    plan.operations_expected += target.size;
+                }
+                None if !target.requires_root => plan.items.push(Item {
+                    name: target.name.clone(),
+                    paths: target.paths.clone(),
+                    disposal: Disposal::for_kind(target.kind),
+                    expected: target.size,
+                }),
+                // Needs elevation but nothing knows how to do it. Dropped
+                // rather than attempted, which would only produce a
+                // permission error per file.
+                None => {}
+            }
+        }
+
+        plan
     }
 
-    /// Total size the plan expects to reclaim.
+    /// Total size the plan expects to reclaim, both halves together.
     pub fn expected(&self) -> Size {
-        self.items.iter().map(|item| item.expected).sum()
+        self.items.iter().map(|item| item.expected).sum::<Size>() + self.operations_expected
     }
 
     /// Whether there is anything to do.
     pub fn is_empty(&self) -> bool {
-        self.items.is_empty()
+        self.items.is_empty() && self.operations.is_empty()
+    }
+
+    /// Whether any of this needs the helper.
+    pub fn needs_elevation(&self) -> bool {
+        !self.operations.is_empty()
     }
 
     /// Whether anything in the plan is removed rather than trashed.
@@ -143,6 +172,9 @@ impl Selection {
             && target.blocked.is_none()
             && target.risk <= self.up_to
             && (self.include_privileged || !target.requires_root)
+            // A privileged target with no operation cannot be cleaned by
+            // anything, so offering it would be a lie.
+            && (!target.requires_root || target.privileged.is_some())
     }
 }
 
@@ -205,6 +237,38 @@ mod tests {
     }
 
     #[test]
+    fn a_privileged_target_becomes_an_operation_rather_than_an_item() {
+        let targets = vec![
+            target("cache", Kind::Cache, Risk::Safe),
+            target("pacman", Kind::PackageCache, Risk::Review)
+                .by_operation(Operation::TrimPackageCache { keep: 3 }),
+        ];
+
+        let plan = Plan::from_targets(&targets);
+
+        assert_eq!(plan.items.len(), 1);
+        assert_eq!(
+            plan.operations,
+            vec![Operation::TrimPackageCache { keep: 3 }]
+        );
+        assert!(plan.needs_elevation());
+        // Both halves count towards what the confirmation promises.
+        assert_eq!(plan.expected().on_disk, 200);
+    }
+
+    #[test]
+    fn a_privileged_target_with_no_operation_is_dropped_and_never_offered() {
+        let orphan = target("mystery", Kind::Log, Risk::Safe).requires_root();
+
+        assert!(Plan::from_targets(std::slice::from_ref(&orphan)).is_empty());
+        let everything = Selection {
+            up_to: Risk::Sensitive,
+            include_privileged: true,
+        };
+        assert!(!everything.includes(&orphan));
+    }
+
+    #[test]
     fn a_plan_totals_what_it_expects_to_reclaim() {
         let targets = vec![
             target("a", Kind::Cache, Risk::Safe),
@@ -237,7 +301,9 @@ mod tests {
             include_privileged: true,
         };
 
-        assert!(selection.includes(&target("root", Kind::Log, Risk::Review).requires_root()));
+        let journal = target("journal", Kind::Log, Risk::Review)
+            .by_operation(Operation::VacuumJournal { days: 14 });
+        assert!(selection.includes(&journal));
         assert!(!selection.includes(&target("pacnew", Kind::Attention, Risk::Sensitive)));
     }
 }

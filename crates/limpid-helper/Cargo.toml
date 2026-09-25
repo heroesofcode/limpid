@@ -13,6 +13,7 @@ name = "limpid-helper"
 path = "src/main.rs"
 
 [dependencies]
+limpid-core.workspace = true
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true

@@ -104,9 +104,14 @@ some capability for it:
   directories itself, contains no `..`, and is not a symlink — checked against
   the filesystem as it is at that moment, not as it was when the plan was
   made. A bug in a scanner should cost a refusal, not a home directory.
-- **Split privilege.** The UI never runs as root. System-level cleaning goes
-  through a small, auditable helper invoked via polkit, which refuses any path
-  outside a compiled-in allowlist.
+- **Split privilege, and no path crosses it.** The UI never runs as root.
+  System-level cleaning goes to a small helper invoked through polkit, and the
+  request it accepts is a fixed set of named operations with bounded
+  parameters — "keep the three newest versions of each package", not "remove
+  these files". There is no request that means "remove this path", so there is
+  no request that can be bent into meaning "remove that one". The helper has
+  no filename parsing, no symlink resolution and no safety judgements in it at
+  all; those live on the unprivileged side, where being wrong is survivable.
 - **Browsers must be closed.** Limpid refuses rather than warns, and finds
   out by walking `/proc/*/fd` rather than by reading a lock file — a lock
   file survives a crash and would report a browser that is not running.
@@ -132,7 +137,7 @@ some capability for it:
 | 5 | Browsers: Chromium family and Firefox ✓ |
 | 6 | Space analyser: treemap and largest items ✓ |
 | 7 | Duplicate files |
-| 8 | Privileged targets: pacman, journald, coredumps, Docker |
+| 8 | Privileged targets: pacman, journald, coredumps ✓ |
 | 9 | Packaging: desktop entry, icon, release binaries, AUR |
 
 ## Layout

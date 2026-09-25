@@ -13,6 +13,7 @@ use limpid_core::execute::{Executor, Outcome};
 use limpid_core::model::{Scan, Target};
 use limpid_core::paths::Roots;
 use limpid_core::plan::{Plan, Selection};
+use limpid_core::privileged::{Report, Request, Runner};
 use limpid_core::walk::WalkOptions;
 use limpid_theme::{Palette, Source, Theme as LimpidTheme};
 
@@ -71,6 +72,16 @@ pub enum Progress {
 /// are stable for as long as a given scan is on screen.
 pub type TargetId = (usize, usize);
 
+/// What a clean did, both halves.
+#[derive(Debug, Clone, Default)]
+pub struct Cleaned {
+    /// What this process removed.
+    pub outcome: Outcome,
+    /// What the helper did, if it was asked. The error is already a
+    /// sentence, because it has to survive crossing a task boundary.
+    pub elevated: Option<Result<Report, String>>,
+}
+
 /// How many of the largest files to list per level.
 const LARGEST_FILES: usize = 8;
 
@@ -108,7 +119,7 @@ pub struct State {
     /// Whether a clean is under way.
     cleaning: bool,
     /// What the last clean did.
-    outcome: Option<Outcome>,
+    outcome: Option<Cleaned>,
     /// The storage page.
     storage: Storage,
 }
@@ -137,7 +148,7 @@ pub enum Message {
     /// The confirmation was accepted.
     Clean,
     /// The clean finished.
-    Cleaned(Box<Outcome>),
+    Cleaned(Box<Cleaned>),
     /// Look at a directory on the storage page.
     Explore(PathBuf),
     /// A directory finished being measured.
@@ -193,7 +204,7 @@ impl State {
     }
 
     /// What the last clean did, if there was one.
-    pub fn outcome(&self) -> Option<&Outcome> {
+    pub fn outcome(&self) -> Option<&Cleaned> {
         self.outcome.as_ref()
     }
 
@@ -382,16 +393,30 @@ impl State {
                 Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
-                            Executor::applying(&Roots::from_env()).run(&plan)
+                            let outcome = Executor::applying(&Roots::from_env()).run(&plan);
+
+                            // Asked for second, and only when there is
+                            // something to ask about: an authentication
+                            // prompt for nothing would be its own kind of
+                            // rude.
+                            let elevated = plan.needs_elevation().then(|| {
+                                Runner::new()
+                                    .run(&Request {
+                                        operations: plan.operations.clone(),
+                                    })
+                                    .map_err(|error| error.to_string())
+                            });
+
+                            Cleaned { outcome, elevated }
                         })
                         .await
                         .unwrap_or_default()
                     },
-                    |outcome| Message::Cleaned(Box::new(outcome)),
+                    |cleaned| Message::Cleaned(Box::new(cleaned)),
                 )
             }
-            Message::Cleaned(outcome) => {
-                self.outcome = Some(*outcome);
+            Message::Cleaned(cleaned) => {
+                self.outcome = Some(*cleaned);
                 // Rescan rather than adjust the numbers in place: what was
                 // actually reclaimed is a measurement, not an assumption.
                 Task::done(Message::StartScan)
@@ -677,6 +702,42 @@ mod tests {
 
         assert!(state.is_selected((0, 0)));
         assert!(!state.is_selected((0, 1)));
+    }
+
+    #[test]
+    fn a_privileged_finding_can_be_ticked_and_becomes_an_operation() {
+        use limpid_core::model::{Category, Kind, Risk};
+        use limpid_core::privileged::Operation;
+        use limpid_core::size::Size;
+
+        let mut category = Category::new("Package manager", "");
+        category.targets = vec![
+            Target::new("pacman", Kind::PackageCache, Risk::Review)
+                .measured(Size::new(900, 900), 1)
+                .by_operation(Operation::TrimPackageCache { keep: 3 }),
+        ];
+        let scan = Scan {
+            categories: vec![category],
+            ..Scan::default()
+        };
+
+        let (mut state, _) = State::boot();
+        let _ = state.update(Message::ScanFinished(Box::new(scan)));
+
+        // Not ticked by default: it costs a password prompt.
+        assert!(!state.is_selected((0, 0)));
+        assert!(state.plan().is_empty());
+
+        let _ = state.update(Message::Toggle((0, 0)));
+        let plan = state.plan();
+
+        assert!(plan.needs_elevation());
+        assert_eq!(
+            plan.operations,
+            vec![Operation::TrimPackageCache { keep: 3 }]
+        );
+        // And it is a named operation, not a path handed across.
+        assert!(plan.items.is_empty());
     }
 
     #[test]
