@@ -48,6 +48,14 @@ impl Watcher {
     pub fn next_timeout(&self, timeout: Duration) -> Option<Palette> {
         self.updates.recv_timeout(timeout).ok()
     }
+
+    /// Block until the theme changes.
+    ///
+    /// `None` only once the watch has shut down, which makes this safe to
+    /// drive a `while let` loop with.
+    pub fn next_blocking(&self) -> Option<Palette> {
+        self.updates.recv().ok()
+    }
 }
 
 /// Watch the Omarchy state directory and report each new palette.

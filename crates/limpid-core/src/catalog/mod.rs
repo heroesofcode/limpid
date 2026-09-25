@@ -81,6 +81,7 @@ pub fn scan(context: &Context) -> Scan {
             logs::scan(context),
             trash::scan(context),
         ],
+        capacity: crate::volume::capacity(&context.roots.home),
         caveats: crate::volume::caveats(&context.roots),
     };
     scan.prune();

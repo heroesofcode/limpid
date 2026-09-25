@@ -185,6 +185,9 @@ impl Category {
 pub struct Scan {
     /// The groups, in the order they should be shown.
     pub categories: Vec<Category>,
+    /// How full the filesystem is, for context: a gigabyte means something
+    /// different on a full disk than on an empty one.
+    pub capacity: Option<crate::volume::Capacity>,
     /// Caveats that apply to the whole scan, such as snapshots pinning
     /// extents so that removing files frees nothing until they rotate out.
     pub caveats: Vec<String>,
@@ -255,7 +258,7 @@ mod tests {
 
         let scan = Scan {
             categories: vec![category],
-            caveats: Vec::new(),
+            ..Scan::default()
         };
 
         assert_eq!(scan.size().on_disk, 1500);
@@ -272,7 +275,7 @@ mod tests {
 
         let mut scan = Scan {
             categories: vec![empty, full],
-            caveats: Vec::new(),
+            ..Scan::default()
         };
         scan.prune();
 
@@ -291,7 +294,7 @@ mod tests {
 
         let mut scan = Scan {
             categories: vec![category],
-            caveats: Vec::new(),
+            ..Scan::default()
         };
         scan.prune();
 
@@ -308,7 +311,7 @@ mod tests {
 
         let mut scan = Scan {
             categories: vec![small, large],
-            caveats: Vec::new(),
+            ..Scan::default()
         };
         scan.prune();
 

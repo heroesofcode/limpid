@@ -79,6 +79,46 @@ pub fn describe_from_mountinfo(mounts: &str, path: &Path) -> Option<Volume> {
     best
 }
 
+/// How full the filesystem holding a path is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+pub struct Capacity {
+    /// Total size of the filesystem.
+    pub total: u64,
+    /// Space available to an unprivileged process.
+    ///
+    /// Deliberately not "free": filesystems reserve a slice for root, and
+    /// reporting that as available overstates what a user can actually use.
+    pub available: u64,
+}
+
+impl Capacity {
+    /// Space in use, as far as the user is concerned.
+    pub fn used(self) -> u64 {
+        self.total.saturating_sub(self.available)
+    }
+
+    /// Fraction of the filesystem in use, 0.0 to 1.0.
+    pub fn fraction_used(self) -> f32 {
+        if self.total == 0 {
+            0.0
+        } else {
+            self.used() as f32 / self.total as f32
+        }
+    }
+}
+
+/// Measure the filesystem holding `path`.
+pub fn capacity(path: &Path) -> Option<Capacity> {
+    let stats = rustix::fs::statvfs(path).ok()?;
+    // f_frsize is the fragment size, which is the unit the block counts are
+    // in. f_bsize is the preferred IO size and is the wrong multiplier.
+    let block = stats.f_frsize;
+    Some(Capacity {
+        total: stats.f_blocks.checked_mul(block)?,
+        available: stats.f_bavail.checked_mul(block)?,
+    })
+}
+
 /// Whether snapshots exist that could pin extents of files being removed.
 ///
 /// Only the presence of snapshots matters here, not how much they hold:
@@ -179,6 +219,31 @@ mod tests {
         assert_eq!(volume.filesystem, "vfat");
         assert!(!volume.copy_on_write);
         assert!(!volume.compressed);
+    }
+
+    #[test]
+    fn the_filesystem_holding_a_real_path_can_be_measured() {
+        let capacity = capacity(Path::new("/")).expect("/ is always mounted");
+
+        assert!(capacity.total > 0);
+        assert!(capacity.available <= capacity.total);
+        assert!((0.0..=1.0).contains(&capacity.fraction_used()));
+    }
+
+    #[test]
+    fn measuring_a_path_that_does_not_exist_gives_nothing() {
+        assert!(capacity(Path::new("/definitely/not/here")).is_none());
+    }
+
+    #[test]
+    fn an_empty_filesystem_does_not_divide_by_zero() {
+        let empty = Capacity {
+            total: 0,
+            available: 0,
+        };
+
+        assert_eq!(empty.used(), 0);
+        assert_eq!(empty.fraction_used(), 0.0);
     }
 
     #[test]

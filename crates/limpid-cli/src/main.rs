@@ -293,7 +293,7 @@ mod tests {
         category.targets = targets;
         Scan {
             categories: vec![category],
-            caveats: Vec::new(),
+            ..Scan::default()
         }
     }
 
