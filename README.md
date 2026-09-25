@@ -57,6 +57,15 @@ limpid-cli theme                      # the palette in force, and its source
 limpid-cli theme --file colors.toml   # resolve a specific theme
 ```
 
+## Where the space went
+
+The catalogue can only find what someone wrote a scanner for. The storage
+view knows nothing and finds everything, which is what you want when the
+space went somewhere nobody anticipated. Area is proportional to occupied
+size; clicking descends.
+
+![The storage view](docs/storage.png)
+
 ## Using it
 
 ```sh
@@ -66,6 +75,8 @@ limpid-cli scan --json       # the same, for a script
 limpid-cli clean             # what would go, changing nothing
 limpid-cli clean --apply     # actually do it
 limpid-cli clean --risk review --apply
+limpid-cli storage                     # where the space went
+limpid-cli storage --path ~/Downloads
 ```
 
 Both front-ends take `--root`, which points the whole engine at a directory
@@ -119,9 +130,10 @@ some capability for it:
 | 3 | The application shell ✓ |
 | 4 | Safe cleaning: dry run, trash, protected paths ✓ |
 | 5 | Browsers: Chromium family and Firefox ✓ |
-| 6 | Space analyser: treemap, largest items, duplicates |
-| 7 | Privileged targets: pacman, journald, coredumps, Docker |
-| 8 | Packaging: desktop entry, icon, release binaries, AUR |
+| 6 | Space analyser: treemap and largest items ✓ |
+| 7 | Duplicate files |
+| 8 | Privileged targets: pacman, journald, coredumps, Docker |
+| 9 | Packaging: desktop entry, icon, release binaries, AUR |
 
 ## Layout
 
