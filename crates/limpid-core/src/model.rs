@@ -89,6 +89,12 @@ pub struct Target {
     pub risk: Risk,
     /// Whether removing it needs privileges the app does not have.
     pub requires_root: bool,
+    /// Why this cannot be acted on right now, if it cannot.
+    ///
+    /// Distinct from risk. A risky target is one the user may choose; a
+    /// blocked one is not offered at all, because acting on it would fail or
+    /// do damage — a browser profile whose browser is open, most of all.
+    pub blocked: Option<String>,
 }
 
 impl Target {
@@ -103,6 +109,7 @@ impl Target {
             kind,
             risk,
             requires_root: false,
+            blocked: None,
         }
     }
 
@@ -125,6 +132,23 @@ impl Target {
     pub fn requires_root(mut self) -> Self {
         self.requires_root = true;
         self
+    }
+
+    /// Mark this as not actionable right now, and say why.
+    #[must_use]
+    pub fn blocked(mut self, reason: impl Into<String>) -> Self {
+        self.blocked = Some(reason.into());
+        self
+    }
+
+    /// Whether this process is permitted and able to clean this.
+    ///
+    /// About permission, not about whether it is worth doing: a target that
+    /// measured zero is still actionable, it just has nothing in it. Leaving
+    /// empty findings out of the *default selection* is a separate judgement,
+    /// and belongs where that selection is made.
+    pub fn is_actionable(&self) -> bool {
+        self.kind != Kind::Attention && self.blocked.is_none() && !self.requires_root
     }
 
     /// Record measured usage.
@@ -170,11 +194,11 @@ impl Category {
         self.targets.iter().map(|target| target.size).sum()
     }
 
-    /// Total size across targets at or below `risk` that need no elevation.
+    /// Total size across targets at or below `risk` that could be acted on.
     pub fn size_at_most(&self, risk: Risk) -> Size {
         self.targets
             .iter()
-            .filter(|target| target.risk <= risk && !target.requires_root)
+            .filter(|target| target.risk <= risk && target.is_actionable())
             .map(|target| target.size)
             .sum()
     }
@@ -263,6 +287,45 @@ mod tests {
 
         assert_eq!(scan.size().on_disk, 1500);
         assert_eq!(scan.reclaimable_unprivileged().on_disk, 300);
+    }
+
+    #[test]
+    fn a_blocked_target_is_kept_in_the_list_but_left_out_of_the_total() {
+        let mut category = Category::new("Browsers", "");
+        category.targets.push(target("free", 100, Risk::Safe));
+        category
+            .targets
+            .push(target("open", 900, Risk::Safe).blocked("Brave is running"));
+
+        let scan = Scan {
+            categories: vec![category],
+            ..Scan::default()
+        };
+
+        // Still shown, because the user needs to know it is there and why.
+        assert_eq!(scan.size().on_disk, 1000);
+        // But not counted as available, because it is not.
+        assert_eq!(scan.reclaimable_unprivileged().on_disk, 100);
+    }
+
+    #[test]
+    fn what_is_actionable_is_about_permission_not_about_worth() {
+        assert!(target("plain", 100, Risk::Safe).is_actionable());
+        assert!(
+            !target("blocked", 100, Risk::Safe)
+                .blocked("open")
+                .is_actionable()
+        );
+        assert!(
+            !target("privileged", 100, Risk::Safe)
+                .requires_root()
+                .is_actionable()
+        );
+        assert!(!Target::new("note", Kind::Attention, Risk::Safe).is_actionable());
+
+        // An empty target is permitted; it simply has nothing in it. Whether
+        // to tick it by default is decided elsewhere.
+        assert!(target("empty", 0, Risk::Safe).is_actionable());
     }
 
     #[test]

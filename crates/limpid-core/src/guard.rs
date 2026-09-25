@@ -31,6 +31,9 @@ pub enum Refusal {
     /// Is a symlink, which would act on something elsewhere.
     #[error("{0} is a symlink")]
     Symlink(PathBuf),
+    /// Carries a name that is never removable, wherever it appears.
+    #[error("{0} is protected by name")]
+    Protected(PathBuf),
 }
 
 impl Refusal {
@@ -41,10 +44,42 @@ impl Refusal {
             | Self::Climbing(path)
             | Self::OutOfBounds(path)
             | Self::IsABoundary(path)
-            | Self::Symlink(path) => path,
+            | Self::Symlink(path)
+            | Self::Protected(path) => path,
         }
     }
 }
+
+/// Files that are never removed, wherever they turn up.
+///
+/// A belt-and-braces list for the browser trees, where a boundary has to
+/// cover a whole profile directory because profile names are not knowable in
+/// advance, and that directory holds irreplaceable things next to caches.
+///
+/// `Local State` is the one that matters most. Besides the profile list it
+/// holds `os_crypt.encrypted_key`, the wrapped key every saved cookie and
+/// password is encrypted with. Removing it leaves every row intact and
+/// permanently undecryptable — a far worse outcome than losing the rows.
+const PROTECTED_NAMES: &[&str] = &[
+    // Chromium.
+    "Local State",
+    "Bookmarks",
+    "Cookies",
+    "History",
+    "Login Data",
+    "Login Data For Account",
+    "Web Data",
+    "Preferences",
+    "Secure Preferences",
+    "Sync Data",
+    // Firefox.
+    "key4.db",
+    "cert9.db",
+    "logins.json",
+    "places.sqlite",
+    "cookies.sqlite",
+    "prefs.js",
+];
 
 /// Decides whether a path may be removed.
 #[derive(Debug, Clone)]
@@ -72,6 +107,20 @@ impl Guard {
             roots.system("/var/log/journal"),
             roots.system("/var/lib/systemd/coredump"),
         ];
+
+        // Browser profile trees have to be admitted whole, because profile
+        // directory names are not knowable in advance. PROTECTED_NAMES is
+        // what keeps that from being as wide as it sounds.
+        for browser in [
+            "BraveSoftware",
+            "google-chrome",
+            "chromium",
+            "vivaldi",
+            "microsoft-edge",
+        ] {
+            boundaries.push(roots.config(browser));
+        }
+        boundaries.push(roots.home(".mozilla/firefox"));
         boundaries.sort();
         boundaries.dedup();
         Self { boundaries }
@@ -93,6 +142,14 @@ impl Guard {
         // or a bug would use to escape.
         if path.components().any(|part| part == Component::ParentDir) {
             return Err(Refusal::Climbing(path.to_owned()));
+        }
+
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| PROTECTED_NAMES.contains(&name))
+        {
+            return Err(Refusal::Protected(path.to_owned()));
         }
 
         if self.boundaries.iter().any(|boundary| boundary == path) {
@@ -182,6 +239,42 @@ mod tests {
                 path.display(),
             );
         }
+    }
+
+    #[test]
+    fn irreplaceable_browser_files_are_refused_by_name() {
+        let (_fixture, roots, guard) = fixture();
+        let profile = roots.config("BraveSoftware/Brave-Browser/Default");
+
+        // Inside a boundary, and still refused.
+        for name in ["Local State", "Cookies", "Login Data", "Bookmarks"] {
+            let path = profile.join(name);
+            assert_eq!(
+                guard.check(&path).unwrap_err(),
+                Refusal::Protected(path.clone()),
+                "{name} should be protected",
+            );
+        }
+
+        // What sits beside them is not.
+        assert!(guard.allows(&profile.join("Cache")));
+        assert!(guard.allows(&profile.join("Service Worker/CacheStorage")));
+    }
+
+    #[test]
+    fn firefox_credentials_are_protected_too() {
+        let (_fixture, roots, guard) = fixture();
+        let profile = roots.home(".mozilla/firefox/abc.default-release");
+
+        assert!(matches!(
+            guard.check(&profile.join("key4.db")),
+            Err(Refusal::Protected(_))
+        ));
+        assert!(matches!(
+            guard.check(&profile.join("logins.json")),
+            Err(Refusal::Protected(_))
+        ));
+        assert!(guard.allows(&profile.join("startupCache")));
     }
 
     #[test]
