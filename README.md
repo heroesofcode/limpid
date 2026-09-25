@@ -9,6 +9,8 @@ the active theme and follows it live when you switch.
 > **Status: early development.** The engine is being built in phases; see the
 > roadmap below. Nothing here deletes anything yet.
 
+![Limpid showing a scan](docs/overview.png)
+
 ## Why another one
 
 Linux cleaning tools split into two halves that never meet. The analysers are
@@ -42,6 +44,8 @@ here.
 Off Omarchy it follows the desktop's light/dark preference through
 `org.freedesktop.appearance` and uses its own palette. With neither, it just
 looks like itself.
+
+![The palette Limpid resolved from the active theme](docs/appearance.png)
 
 ```sh
 limpid-cli theme                      # the palette in force, and its source

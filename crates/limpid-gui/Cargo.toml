@@ -18,3 +18,6 @@ limpid-theme.workspace = true
 anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+tokio = { version = "1", features = ["rt", "time"] }
+iced = { version = "0.14", features = ["canvas", "tokio", "svg", "advanced"] }
