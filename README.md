@@ -138,7 +138,7 @@ some capability for it:
 | 6 | Space analyser: treemap and largest items ✓ |
 | 7 | Duplicate files |
 | 8 | Privileged targets: pacman, journald, coredumps ✓ |
-| 9 | Packaging: desktop entry, icon, release binaries, AUR |
+| 9 | Packaging: desktop entry, icon, release binaries, AUR ✓ |
 
 ## Layout
 
@@ -153,10 +153,35 @@ crates/limpid-helper   privileged helper, invoked through polkit
 Nothing that deletes a file lives in the GUI, and what runs as root is kept
 small enough to read in one sitting.
 
+## Installing
+
+From the AUR, once released:
+
+```sh
+yay -S limpid
+```
+
+Or from source:
+
+```sh
+make build
+sudo make install
+```
+
+`make install` puts `limpid` and `limpid-cli` in `/usr/bin`, the privileged
+helper in `/usr/lib/limpid` — it is not a command anyone should run directly,
+and the polkit policy names that exact path — and the policy, desktop entry
+and icon where the desktop expects them. `make uninstall` takes it all back
+out.
+
+`paccache` (from `pacman-contrib`) is needed for the package-cache operation;
+everything else works without it.
+
 ## Building
 
 ```sh
-cargo build --workspace --release
+make build     # cargo build --release --workspace
+make check     # fmt, clippy with warnings denied, and the tests
 ```
 
 ## License
