@@ -1,0 +1,21 @@
+[package]
+name = "limpid-cli"
+description = "Command-line interface for Limpid"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "limpid-cli"
+path = "src/main.rs"
+
+[dependencies]
+limpid-core.workspace = true
+anyhow.workspace = true
+clap = { version = "4.5", features = ["derive"] }
+serde_json.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

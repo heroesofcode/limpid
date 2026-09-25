@@ -1,0 +1,36 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/limpid-core",
+    "crates/limpid-theme",
+    "crates/limpid-cli",
+    "crates/limpid-gui",
+    "crates/limpid-helper",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/heroesofcode/limpid"
+homepage = "https://github.com/heroesofcode/limpid"
+authors = ["Pedro Henrique <13969802+pedrohfp@users.noreply.github.com>"]
+
+[workspace.dependencies]
+limpid-core = { path = "crates/limpid-core", version = "0.1.0" }
+limpid-theme = { path = "crates/limpid-theme", version = "0.1.0" }
+
+anyhow = "1.0"
+thiserror = "2.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true

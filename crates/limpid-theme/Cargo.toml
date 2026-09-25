@@ -1,0 +1,15 @@
+[package]
+name = "limpid-theme"
+description = "Palette resolution for Limpid, following the Omarchy theme when present"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+thiserror.workspace = true
+toml.workspace = true
+tracing.workspace = true

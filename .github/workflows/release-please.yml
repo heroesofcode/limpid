@@ -1,0 +1,23 @@
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v5
+        with:
+          # A PR opened with the default GITHUB_TOKEN does not trigger other
+          # workflows, which would leave the release PR without the `ci` check
+          # that main requires. Set RELEASE_PLEASE_TOKEN to a PAT if that bites;
+          # closing and reopening the PR is the no-secret way out.
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json

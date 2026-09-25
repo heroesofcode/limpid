@@ -1,0 +1,39 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98
+
+      # Build dependencies for the Iced front-end: wgpu needs a Vulkan loader,
+      # and winit needs the Wayland and X11 client libraries even to link.
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwayland-dev libxkbcommon-dev libvulkan-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev
+
+      - uses: Swatinem/rust-cache@f51f967e158417aafa338a1e46ab22095f07aa01
+
+      - name: Check formatting
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features
+
+      - name: Test
+        run: cargo test --workspace --all-features
+
+      - name: Build release
+        run: cargo build --workspace --release

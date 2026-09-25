@@ -1,0 +1,20 @@
+[package]
+name = "limpid-gui"
+description = "Limpid, a system cleaner for Linux"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "limpid"
+path = "src/main.rs"
+
+[dependencies]
+limpid-core.workspace = true
+limpid-theme.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
