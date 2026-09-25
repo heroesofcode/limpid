@@ -1,0 +1,16 @@
+[Desktop Entry]
+Type=Application
+Name=Limpid
+GenericName=System Cleaner
+Comment=Find reclaimable space and remove it carefully
+# A bare binary name, no wrapper and no env prefix: some launchers read only
+# the first token of Exec, and anything else silently fails to start.
+Exec=limpid
+Icon=limpid
+Terminal=false
+Categories=Utility;Filesystem;
+Keywords=clean;cache;disk;space;storage;junk;browser;
+# Has to match the Wayland app id the window sets, or the compositor cannot
+# associate the window with this entry and it gets no icon.
+StartupWMClass=org.limpid.Limpid
+StartupNotify=true
