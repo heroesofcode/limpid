@@ -89,7 +89,7 @@ impl Plan {
     pub fn from_targets<'a>(targets: impl IntoIterator<Item = &'a Target>) -> Self {
         let items = targets
             .into_iter()
-            .filter(|target| target.kind != Kind::Attention && !target.requires_root)
+            .filter(|target| target.is_actionable())
             .map(|target| Item {
                 name: target.name.clone(),
                 paths: target.paths.clone(),
@@ -140,6 +140,7 @@ impl Selection {
     /// Whether a target is in this selection.
     pub fn includes(&self, target: &Target) -> bool {
         target.kind != Kind::Attention
+            && target.blocked.is_none()
             && target.risk <= self.up_to
             && (self.include_privileged || !target.requires_root)
     }
@@ -187,6 +188,20 @@ mod tests {
 
         assert_eq!(plan.items.len(), 1);
         assert_eq!(plan.items[0].name, "cache");
+    }
+
+    #[test]
+    fn a_blocked_target_never_reaches_a_plan() {
+        let targets = vec![
+            target("free", Kind::Cache, Risk::Safe),
+            target("open", Kind::Cache, Risk::Safe).blocked("Brave is running"),
+        ];
+
+        let plan = Plan::from_targets(&targets);
+
+        assert_eq!(plan.items.len(), 1);
+        assert_eq!(plan.items[0].name, "free");
+        assert!(!Selection::SAFE.includes(&targets[1]));
     }
 
     #[test]

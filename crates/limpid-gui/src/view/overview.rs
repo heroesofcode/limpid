@@ -414,6 +414,9 @@ fn target_row<'a>(
     if target.requires_root {
         labels = labels.push(chip(palette, "needs root", palette.dark_foreground));
     }
+    if target.blocked.is_some() {
+        labels = labels.push(chip(palette, "in use", palette.orange));
+    }
     if target.risk != Risk::Safe {
         labels = labels.push(chip(
             palette,
@@ -424,9 +427,7 @@ fn target_row<'a>(
 
     // Nothing to tick for an item that is only a note, or one this process
     // could not act on even if asked.
-    let selectable = target.kind != limpid_core::model::Kind::Attention
-        && !target.requires_root
-        && !target.size.is_zero();
+    let selectable = target.is_actionable() && !target.size.is_zero();
 
     let tick: Element<'a, Message> = if selectable {
         checkbox(state.is_selected(id))
@@ -443,9 +444,16 @@ fn target_row<'a>(
             tick,
             column![
                 labels,
-                text(target.detail.as_str())
-                    .size(ty::CAPTION)
-                    .style(style::secondary(palette)),
+                // The reason it cannot be touched displaces the description:
+                // "close Brave first" is the only thing worth reading here.
+                match &target.blocked {
+                    Some(reason) => text(reason.as_str())
+                        .size(ty::CAPTION)
+                        .style(style::tinted(palette.orange)),
+                    None => text(target.detail.as_str())
+                        .size(ty::CAPTION)
+                        .style(style::secondary(palette)),
+                },
             ]
             .spacing(3)
             .width(Length::Fill),

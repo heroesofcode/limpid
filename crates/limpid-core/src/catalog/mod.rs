@@ -8,6 +8,7 @@ use crate::model::{Category, Scan, Target};
 use crate::paths::Roots;
 use crate::walk::{WalkOptions, measure_all};
 
+pub mod browsers;
 pub mod caches;
 pub mod development;
 pub mod logs;
@@ -75,6 +76,7 @@ impl Default for Context {
 pub fn scan(context: &Context) -> Scan {
     let mut scan = Scan {
         categories: vec![
+            browsers::scan(context),
             caches::scan(context),
             packages::scan(context),
             development::scan(context),

@@ -28,6 +28,11 @@ nothing else does:
   snapshot frees *zero* bytes when deleted. Limpid measures `st_blocks`, not
   apparent size, and says so when snapshots are in play — instead of promising
   gigabytes that never arrive.
+- **It looks in both places a browser hides things.** A Chromium profile
+  keeps its HTTP cache under `~/.cache` and a further pile — service workers,
+  extension archives, GPU state — inside `~/.config`, next to the bookmarks.
+  On the machine this was built on that second half is 200 MB that a tool
+  cleaning only `~/.cache` never sees.
 - **Arch-native.** The pacman cache, AUR build trees, orphan packages,
   `.pacnew` files and Limine/snapper interactions are first-class, not an
   afterthought bolted onto a Debian model.
@@ -91,9 +96,16 @@ some capability for it:
 - **Split privilege.** The UI never runs as root. System-level cleaning goes
   through a small, auditable helper invoked via polkit, which refuses any path
   outside a compiled-in allowlist.
-- **Browsers must be closed.** Limpid refuses rather than warns — cleaning a
-  live Chromium profile can make it discard the whole database, not just the
-  rows you asked for.
+- **Browsers must be closed.** Limpid refuses rather than warns, and finds
+  out by walking `/proc/*/fd` rather than by reading a lock file — a lock
+  file survives a crash and would report a browser that is not running.
+  Cleaning a live Chromium profile does not free the space while the
+  descriptors are open, and can make it discard the whole database rather
+  than the part you asked for.
+- **Some files are protected by name, wherever they appear.** `Local State`
+  above all: it holds the wrapped key every saved cookie and password is
+  encrypted with, so removing it leaves every row intact and permanently
+  undecryptable.
 - **No blanket rules.** Removing orphan packages asks per package. `.pacnew`
   files are reported as work to do, never as reclaimable space.
 
@@ -106,7 +118,7 @@ some capability for it:
 | 2 | Theme: Omarchy palette, live reload, standalone fallback ✓ |
 | 3 | The application shell ✓ |
 | 4 | Safe cleaning: dry run, trash, protected paths ✓ |
-| 5 | Browsers: Chromium family and Firefox |
+| 5 | Browsers: Chromium family and Firefox ✓ |
 | 6 | Space analyser: treemap, largest items, duplicates |
 | 7 | Privileged targets: pacman, journald, coredumps, Docker |
 | 8 | Packaging: desktop entry, icon, release binaries, AUR |

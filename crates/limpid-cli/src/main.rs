@@ -233,6 +233,16 @@ fn report(out: &mut impl Write, scan: &Scan, colour: bool) -> io::Result<()> {
                 root,
                 style.risk(target.risk)
             )?;
+
+            // A blocked finding is listed with its reason rather than
+            // quietly dropped: the user can act on "close Brave", and cannot
+            // act on a number that went missing without explanation.
+            if let Some(reason) = &target.blocked {
+                let headline = reason
+                    .split_once(". ")
+                    .map_or(reason.as_str(), |(head, _)| head);
+                writeln!(out, "             {}", style.paint("33", headline))?;
+            }
         }
     }
 
