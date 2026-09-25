@@ -9,7 +9,10 @@ members = [
 ]
 
 [workspace.package]
-version = "0.1.0"
+# Deliberately no `version` here. release-please's Rust support updates each
+# member manifest and the lock file together, and it cannot follow
+# `version.workspace = true` — it reads the inherited value as untagged and
+# refuses to open a release pull request at all.
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
