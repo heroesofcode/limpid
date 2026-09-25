@@ -17,6 +17,7 @@ use limpid_core::execute::{Executor, Outcome, Problem};
 use limpid_core::model::{Risk, Scan};
 use limpid_core::paths::{ROOT_OVERRIDE, Roots};
 use limpid_core::plan::{Plan, Selection};
+use limpid_core::privileged::{Report, Request, RunError, Runner};
 use limpid_core::size::human;
 
 #[derive(Parser)]
@@ -73,6 +74,9 @@ enum Command {
         /// The highest risk level to include.
         #[arg(long, value_enum, default_value = "safe")]
         risk: RiskArg,
+        /// Also do the parts that need root, which asks for authentication.
+        #[arg(long)]
+        include_root: bool,
     },
     /// Show where the space went, without judging any of it.
     Storage {
@@ -120,11 +124,15 @@ fn main() -> Result<()> {
                 report(&mut stdout, &scan, colour)
             }
         }
-        Command::Clean { apply, risk } => {
+        Command::Clean {
+            apply,
+            risk,
+            include_root,
+        } => {
             let scan = catalog::scan(&context);
             let selection = Selection {
                 up_to: risk.into(),
-                include_privileged: false,
+                include_privileged: include_root,
             };
             let plan = Plan::from_targets(
                 scan.categories
@@ -140,9 +148,20 @@ fn main() -> Result<()> {
             };
             let outcome = executor.run(&plan);
 
+            // The privileged half is a separate request to a separate
+            // process, and only made when the user asked for it and meant
+            // it: a dry run never raises an authentication prompt.
+            let elevated = if apply && plan.needs_elevation() {
+                Some(Runner::new().run(&Request {
+                    operations: plan.operations.clone(),
+                }))
+            } else {
+                None
+            };
+
             let colour = io::stdout().is_terminal();
             let mut stdout = io::stdout().lock();
-            report_clean(&mut stdout, &plan, &outcome, colour)
+            report_clean(&mut stdout, &plan, &outcome, elevated.as_ref(), colour)
         }
         Command::Storage { path, files } => {
             let root = path.unwrap_or_else(|| context.roots.home.clone());
@@ -314,6 +333,7 @@ fn report_clean(
     out: &mut impl Write,
     plan: &Plan,
     outcome: &Outcome,
+    elevated: Option<&Result<Report, RunError>>,
     colour: bool,
 ) -> io::Result<()> {
     let style = Style { enabled: colour };
@@ -333,7 +353,45 @@ fn report_clean(
         )?;
     }
 
+    for operation in &plan.operations {
+        writeln!(out, "  {:>9}  {}", "", style.dim(&operation.describe()),)?;
+    }
+
     writeln!(out)?;
+
+    match elevated {
+        Some(Ok(report)) => {
+            for done in &report.completed {
+                let mark = if done.succeeded {
+                    style.paint("32", "done")
+                } else {
+                    style.paint("31", "failed")
+                };
+                writeln!(out, "{mark} {}: {}", done.operation, done.detail)?;
+            }
+        }
+        Some(Err(error)) => {
+            writeln!(
+                out,
+                "{} {error}",
+                style.paint("31", "elevated part not done:")
+            )?;
+        }
+        None if plan.needs_elevation() && !outcome.applied => {
+            writeln!(
+                out,
+                "{}",
+                style.dim(&format!(
+                    "The parts needing root would free about {} more. They are handed \
+                     to the privileged helper, which asks for authentication; pass \
+                     --include-root --apply to do it.",
+                    human(plan.operations_expected.on_disk),
+                )),
+            )?;
+        }
+        None => {}
+    }
+
     if outcome.applied {
         writeln!(
             out,
@@ -534,10 +592,32 @@ mod tests {
         }
     }
 
+    fn render_clean(plan: &Plan, outcome: &Outcome) -> String {
+        let mut buffer = Vec::new();
+        report_clean(&mut buffer, plan, outcome, None, false).unwrap();
+        String::from_utf8(buffer).unwrap()
+    }
+
     fn render(scan: &Scan) -> String {
         let mut buffer = Vec::new();
         report(&mut buffer, scan, false).unwrap();
         String::from_utf8(buffer).unwrap()
+    }
+
+    #[test]
+    fn a_dry_run_says_the_privileged_half_would_need_authentication() {
+        use limpid_core::model::Kind;
+        use limpid_core::privileged::Operation;
+        use limpid_core::size::Size;
+
+        let plan = Plan::from_targets(&[Target::new("pacman", Kind::PackageCache, Risk::Review)
+            .measured(Size::new(100, 100), 1)
+            .by_operation(Operation::TrimPackageCache { keep: 3 })]);
+
+        let output = render_clean(&plan, &Outcome::default());
+
+        assert!(output.contains("Keep the 3 newest versions"), "{output}");
+        assert!(output.contains("asks for authentication"), "{output}");
     }
 
     #[test]

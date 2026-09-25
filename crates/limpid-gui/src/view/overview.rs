@@ -6,7 +6,7 @@
 use iced::widget::{Space, button, checkbox, column, container, responsive, row, text};
 use iced::{Alignment, Element, Length};
 
-use limpid_core::execute::Outcome;
+use crate::app::Cleaned;
 use limpid_core::model::{Category, Risk, Scan, Target};
 use limpid_core::size::human;
 use limpid_theme::{Color, Palette};
@@ -251,6 +251,18 @@ fn confirmation<'a>(palette: Palette, state: &'a State) -> Element<'a, Message> 
         ]);
     }
 
+    for operation in &plan.operations {
+        lines = lines.push(row![
+            text(operation.describe())
+                .size(ty::BODY_SMALL)
+                .style(style::body(palette))
+                .width(Length::Fill),
+            text("needs root")
+                .size(ty::CAPTION)
+                .style(style::secondary(palette)),
+        ]);
+    }
+
     let warning = if plan.has_permanent_deletions() {
         "This cannot be undone. Caches are removed outright rather than sent to the \
          trash, because moving them there would not free any space."
@@ -268,6 +280,18 @@ fn confirmation<'a>(palette: Palette, state: &'a State) -> Element<'a, Message> 
                 .style(style::secondary(palette)),
             Space::new().height(Length::Fixed(ty::GAP_TIGHT)),
             lines,
+            Space::new().height(Length::Fixed(ty::GAP_TIGHT)),
+            if plan.needs_elevation() {
+                text(
+                    "Some of this needs root. Limpid will ask for your password, and \
+                     the work is done by a small separate program that only accepts a \
+                     fixed list of operations — it is never given a path.",
+                )
+                .size(ty::CAPTION)
+                .style(style::tinted(palette.orange))
+            } else {
+                text("").size(ty::CAPTION)
+            },
             Space::new().height(Length::Fixed(ty::GAP)),
             row![
                 Space::new().width(Length::Fill),
@@ -290,37 +314,54 @@ fn confirmation<'a>(palette: Palette, state: &'a State) -> Element<'a, Message> 
     .into()
 }
 
-/// What the last clean did.
-fn result<'a>(palette: Palette, outcome: &'a Outcome) -> Element<'a, Message> {
-    let headline = format!(
-        "Reclaimed {} across {} files.",
-        human(outcome.reclaimed.on_disk),
-        outcome.files
-    );
+/// What the last clean did, both halves.
+fn result<'a>(palette: Palette, cleaned: &'a Cleaned) -> Element<'a, Message> {
+    let outcome = &cleaned.outcome;
 
-    let mut body = column![
+    let line = |good: bool, said: String| {
         row![
-            text("\u{2713}")
-                .size(ty::BODY)
-                .style(style::tinted(palette.green)),
-            text(headline).size(ty::BODY).style(style::body(palette)),
+            text(if good { "\u{2713}" } else { "\u{2717}" })
+                .size(ty::BODY_SMALL)
+                .style(style::tinted(if good {
+                    palette.green
+                } else {
+                    palette.red
+                })),
+            text(said).size(ty::BODY_SMALL).style(style::body(palette)),
         ]
-        .spacing(ty::GAP_TIGHT),
-    ]
+        .spacing(ty::GAP_TIGHT)
+    };
+
+    let mut body = column![line(
+        true,
+        format!(
+            "Reclaimed {} across {} files.",
+            human(outcome.reclaimed.on_disk),
+            outcome.files,
+        ),
+    )]
     .spacing(6);
 
     for problem in &outcome.problems {
-        body = body.push(
-            row![
-                text("\u{2717}")
-                    .size(ty::BODY_SMALL)
-                    .style(style::tinted(palette.red)),
-                text(problem.to_string())
-                    .size(ty::CAPTION)
-                    .style(style::secondary(palette)),
-            ]
-            .spacing(ty::GAP_TIGHT),
-        );
+        body = body.push(line(false, problem.to_string()));
+    }
+
+    match &cleaned.elevated {
+        Some(Ok(report)) => {
+            for done in &report.completed {
+                body = body.push(line(
+                    done.succeeded,
+                    format!("{}: {}", done.operation.describe(), done.detail),
+                ));
+            }
+        }
+        Some(Err(error)) => {
+            body = body.push(line(
+                false,
+                format!("The parts needing root were not done — {error}"),
+            ));
+        }
+        None => {}
     }
 
     container(body)
@@ -427,7 +468,13 @@ fn target_row<'a>(
 
     // Nothing to tick for an item that is only a note, or one this process
     // could not act on even if asked.
-    let selectable = target.is_actionable() && !target.size.is_zero();
+    // A privileged target is selectable when the helper knows an operation
+    // for it; one that needs root and names no operation cannot be cleaned
+    // by anything, so offering a tick would be a lie.
+    let selectable = !target.size.is_zero()
+        && target.blocked.is_none()
+        && target.kind != limpid_core::model::Kind::Attention
+        && (target.is_actionable() || target.privileged.is_some());
 
     let tick: Element<'a, Message> = if selectable {
         checkbox(state.is_selected(id))
