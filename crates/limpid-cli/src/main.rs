@@ -11,6 +11,7 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use limpid_core::analyse::{self, Breakdown, Entry};
 use limpid_core::catalog::{self, Context};
 use limpid_core::execute::{Executor, Outcome, Problem};
 use limpid_core::model::{Risk, Scan};
@@ -73,6 +74,15 @@ enum Command {
         #[arg(long, value_enum, default_value = "safe")]
         risk: RiskArg,
     },
+    /// Show where the space went, without judging any of it.
+    Storage {
+        /// The directory to break down. Defaults to the home directory.
+        #[arg(long, value_name = "DIR")]
+        path: Option<PathBuf>,
+        /// How many of the largest individual files to list.
+        #[arg(long, default_value_t = 10)]
+        files: usize,
+    },
     /// Show the palette Limpid would draw with, and where it came from.
     Theme {
         /// Resolve this colors.toml instead of the active theme.
@@ -133,6 +143,22 @@ fn main() -> Result<()> {
             let colour = io::stdout().is_terminal();
             let mut stdout = io::stdout().lock();
             report_clean(&mut stdout, &plan, &outcome, colour)
+        }
+        Command::Storage { path, files } => {
+            let root = path.unwrap_or_else(|| context.roots.home.clone());
+            let colour = io::stdout().is_terminal();
+            match analyse::breakdown(&root, &context.walk) {
+                Ok(breakdown) => {
+                    let largest =
+                        analyse::largest_files(&root, files, &context.walk).unwrap_or_default();
+                    let mut stdout = io::stdout().lock();
+                    report_storage(&mut stdout, &breakdown, &largest, colour)
+                }
+                Err(error) => {
+                    eprintln!("cannot read {}: {error}", root.display());
+                    std::process::exit(1);
+                }
+            }
         }
         Command::Theme { file } => {
             let theme = match &file {
@@ -337,6 +363,96 @@ fn report_clean(
     Ok(())
 }
 
+/// Print a directory breakdown and the largest files under it.
+fn report_storage(
+    out: &mut impl Write,
+    breakdown: &Breakdown,
+    largest: &[Entry],
+    colour: bool,
+) -> io::Result<()> {
+    let style = Style { enabled: colour };
+    let total = breakdown.total().on_disk;
+
+    writeln!(
+        out,
+        "{}  {}",
+        style.bold(&breakdown.root.display().to_string()),
+        human(total),
+    )?;
+
+    if breakdown.is_empty() {
+        writeln!(out, "  empty")?;
+        return Ok(());
+    }
+
+    for child in breakdown.children.iter().take(20) {
+        let share = child.share_of(total);
+        writeln!(
+            out,
+            "  {:>9}  {}  {}{}",
+            human(child.size.on_disk),
+            bar(share, 16),
+            child.name,
+            if child.is_dir { "/" } else { "" },
+        )?;
+    }
+
+    if !largest.is_empty() {
+        writeln!(out, "\n{}", style.bold("Largest files"))?;
+        for entry in largest {
+            writeln!(
+                out,
+                "  {:>9}  {}",
+                human(entry.size.on_disk),
+                style.dim(&entry.path.display().to_string()),
+            )?;
+        }
+    }
+
+    if breakdown.unreadable > 0 {
+        writeln!(
+            out,
+            "\n{}",
+            style.dim(&format!(
+                "{} paths could not be read, so this is a lower bound.",
+                breakdown.unreadable,
+            )),
+        )?;
+    }
+
+    Ok(())
+}
+
+/// A proportion, as a bar of block characters.
+///
+/// Uses the eighth-block characters rather than whole cells. Forcing a whole
+/// block for anything non-zero — the obvious alternative — makes a directory
+/// holding a thousandth of the total look the same as one holding a
+/// sixteenth, which is the one thing the bar exists to distinguish.
+fn bar(share: f32, width: usize) -> String {
+    const EIGHTHS: [char; 8] = [
+        '\u{258f}', '\u{258e}', '\u{258d}', '\u{258c}', '\u{258b}', '\u{258a}', '\u{2589}',
+        '\u{2588}',
+    ];
+
+    let eighths = (share.clamp(0.0, 1.0) * (width * 8) as f32).round() as usize;
+    let full = eighths / 8;
+    let remainder = eighths % 8;
+
+    let mut bar = String::with_capacity(width * 3);
+    for _ in 0..full.min(width) {
+        bar.push('\u{2588}');
+    }
+    if full < width && remainder > 0 {
+        bar.push(EIGHTHS[remainder - 1]);
+    }
+    let drawn = full.min(width) + usize::from(full < width && remainder > 0);
+    for _ in drawn..width {
+        bar.push(' ');
+    }
+    bar
+}
+
 /// Print the resolved palette, with a swatch of each colour.
 fn show_theme(out: &mut impl Write, theme: &limpid_theme::Theme, colour: bool) -> io::Result<()> {
     use limpid_theme::Color;
@@ -422,6 +538,22 @@ mod tests {
         let mut buffer = Vec::new();
         report(&mut buffer, scan, false).unwrap();
         String::from_utf8(buffer).unwrap()
+    }
+
+    #[test]
+    fn a_proportion_bar_is_always_the_width_asked_for() {
+        for share in [0.0, 0.001, 0.37, 0.5, 1.0, 5.0, f32::NAN] {
+            assert_eq!(bar(share, 8).chars().count(), 8, "share {share}");
+        }
+    }
+
+    #[test]
+    fn a_proportion_bar_distinguishes_small_shares_from_each_other() {
+        // Whole blocks alone cannot tell these apart; eighths can.
+        assert_eq!(bar(1.0, 8), "████████");
+        assert_eq!(bar(0.5, 8), "████    ");
+        assert_ne!(bar(0.02, 8), bar(0.10, 8));
+        assert_eq!(bar(0.0, 8), "        ");
     }
 
     #[test]

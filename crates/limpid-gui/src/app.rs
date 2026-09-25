@@ -1,16 +1,19 @@
 //! Application state and the top-level view.
 
 use std::collections::BTreeSet;
+use std::path::PathBuf;
 use std::time::Duration;
 
 use iced::widget::{Space, column, container, row, scrollable, text};
 use iced::{Element, Length, Subscription, Task};
 
+use limpid_core::analyse::{self, Survey};
 use limpid_core::catalog::{self, Context};
 use limpid_core::execute::{Executor, Outcome};
 use limpid_core::model::{Scan, Target};
 use limpid_core::paths::Roots;
 use limpid_core::plan::{Plan, Selection};
+use limpid_core::walk::WalkOptions;
 use limpid_theme::{Palette, Source, Theme as LimpidTheme};
 
 use crate::style;
@@ -22,18 +25,21 @@ use crate::view;
 pub enum Page {
     /// What was found, and how much of it there is.
     Overview,
+    /// Where the space went, whatever it is.
+    Storage,
     /// Where the palette comes from, and what Limpid is.
     Settings,
 }
 
 impl Page {
     /// Every page, in navigation order.
-    pub const ALL: [Self; 2] = [Self::Overview, Self::Settings];
+    pub const ALL: [Self; 3] = [Self::Overview, Self::Storage, Self::Settings];
 
     /// The label in the sidebar, which is also the page heading.
     pub fn title(self) -> &'static str {
         match self {
             Self::Overview => "Overview",
+            Self::Storage => "Storage",
             Self::Settings => "Settings",
         }
     }
@@ -42,6 +48,7 @@ impl Page {
     pub fn subtitle(self) -> &'static str {
         match self {
             Self::Overview => "What is taking up space, and what is safe to let go of",
+            Self::Storage => "Where the space went, with no opinion about whether it should have",
             Self::Settings => "Where Limpid gets its colours, and what it is",
         }
     }
@@ -64,6 +71,28 @@ pub enum Progress {
 /// are stable for as long as a given scan is on screen.
 pub type TargetId = (usize, usize);
 
+/// How many of the largest files to list per level.
+const LARGEST_FILES: usize = 8;
+
+/// The storage page's own state.
+#[derive(Default)]
+pub struct Storage {
+    /// The path from the starting directory down to the one on screen, which
+    /// is also the breadcrumb.
+    pub trail: Vec<PathBuf>,
+    /// What the current level holds.
+    pub survey: Option<Survey>,
+    /// Whether a walk is under way.
+    pub working: bool,
+}
+
+impl Storage {
+    /// The directory being shown.
+    pub fn current(&self) -> Option<&PathBuf> {
+        self.trail.last()
+    }
+}
+
 /// Everything the window shows.
 pub struct State {
     /// The colours in force, and where they came from.
@@ -80,6 +109,8 @@ pub struct State {
     cleaning: bool,
     /// What the last clean did.
     outcome: Option<Outcome>,
+    /// The storage page.
+    storage: Storage,
 }
 
 /// Everything that can happen.
@@ -107,6 +138,14 @@ pub enum Message {
     Clean,
     /// The clean finished.
     Cleaned(Box<Outcome>),
+    /// Look at a directory on the storage page.
+    Explore(PathBuf),
+    /// A directory finished being measured.
+    Explored(Box<Survey>),
+    /// A tile on the treemap was clicked.
+    Descend(usize),
+    /// A breadcrumb was clicked; go back to that depth.
+    Ascend(usize),
 }
 
 impl State {
@@ -123,6 +162,7 @@ impl State {
             confirming: false,
             cleaning: false,
             outcome: None,
+            storage: Storage::default(),
         };
         (state, Task::done(Message::StartScan))
     }
@@ -155,6 +195,11 @@ impl State {
     /// What the last clean did, if there was one.
     pub fn outcome(&self) -> Option<&Outcome> {
         self.outcome.as_ref()
+    }
+
+    /// The storage page's state.
+    pub fn storage(&self) -> &Storage {
+        &self.storage
     }
 
     /// How the scan is going.
@@ -226,7 +271,59 @@ impl State {
         match message {
             Message::Navigate(page) => {
                 self.page = page;
+                // Measuring a whole home directory takes seconds, so it
+                // happens when the page is first opened rather than at start
+                // up, and only once.
+                if page == Page::Storage && self.storage.trail.is_empty() {
+                    return Task::done(Message::Explore(Roots::from_env().home));
+                }
                 Task::none()
+            }
+            Message::Explore(path) => {
+                if self.storage.trail.last() != Some(&path) {
+                    self.storage.trail.push(path.clone());
+                }
+                self.storage.working = true;
+                self.storage.survey = None;
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            analyse::survey(&path, LARGEST_FILES, &WalkOptions::default())
+                                .unwrap_or_default()
+                        })
+                        .await
+                        .unwrap_or_default()
+                    },
+                    |survey| Message::Explored(Box::new(survey)),
+                )
+            }
+            Message::Explored(survey) => {
+                self.storage.working = false;
+                self.storage.survey = Some(*survey);
+                Task::none()
+            }
+            Message::Descend(index) => {
+                let Some(survey) = &self.storage.survey else {
+                    return Task::none();
+                };
+                let Some(child) = survey.breakdown.children.get(index) else {
+                    return Task::none();
+                };
+                // A file has nothing inside it to show.
+                if !child.is_dir {
+                    return Task::none();
+                }
+                Task::done(Message::Explore(child.path.clone()))
+            }
+            Message::Ascend(depth) => {
+                if depth + 1 >= self.storage.trail.len() {
+                    return Task::none();
+                }
+                // Trimming here rather than letting Explore rebuild it keeps
+                // the breadcrumb correct for the frame that renders while
+                // the walk is still running.
+                self.storage.trail.truncate(depth + 1);
+                Task::done(Message::Explore(self.storage.trail[depth].clone()))
             }
             Message::StartScan => {
                 if matches!(self.progress, Progress::Running) {
@@ -312,6 +409,7 @@ impl State {
 
         let body = match self.page {
             Page::Overview => view::overview::view(palette, self),
+            Page::Storage => view::storage::view(palette, self.storage()),
             Page::Settings => view::settings::view(palette, &self.theme),
         };
 
@@ -392,8 +490,11 @@ fn palette_changes() -> impl iced::futures::Stream<Item = Message> {
     )
 }
 
-/// Placeholder shown while the scan runs and before the first result.
-pub fn placeholder<'a>(palette: Palette, message: &'a str) -> Element<'a, Message> {
+/// Placeholder shown while work is under way and before the first result.
+pub fn placeholder<'a>(
+    palette: Palette,
+    message: impl text::IntoFragment<'a>,
+) -> Element<'a, Message> {
     container(
         column![
             Space::new().height(Length::Fixed(ty::GAP_WIDE)),
@@ -588,6 +689,75 @@ mod tests {
         // The figure shown afterwards is measured again rather than assumed.
         let _ = state.update(Message::ScanFinished(Box::new(sample_scan())));
         assert!(!state.is_cleaning());
+    }
+
+    #[test]
+    fn opening_the_storage_page_starts_a_measurement_once() {
+        let (mut state, _) = State::boot();
+
+        let first = state.update(Message::Navigate(Page::Storage));
+        assert_eq!(state.page, Page::Storage);
+        drop(first);
+
+        // Simulate the walk that the task would have started.
+        let _ = state.update(Message::Explore(PathBuf::from("/tmp")));
+        let _ = state.update(Message::Explored(Box::default()));
+        assert_eq!(state.storage().trail.len(), 1);
+
+        // Coming back later does not measure again.
+        let _ = state.update(Message::Navigate(Page::Overview));
+        let _ = state.update(Message::Navigate(Page::Storage));
+        assert_eq!(state.storage().trail.len(), 1);
+    }
+
+    #[test]
+    fn descending_into_something_that_is_not_a_directory_goes_nowhere() {
+        use limpid_core::analyse::{Breakdown, Entry, Survey};
+        use limpid_core::size::Size;
+
+        let (mut state, _) = State::boot();
+        let _ = state.update(Message::Explore(PathBuf::from("/tmp")));
+        let _ = state.update(Message::Explored(Box::new(Survey {
+            breakdown: Breakdown {
+                children: vec![Entry {
+                    path: "/tmp/film.mkv".into(),
+                    name: "film.mkv".into(),
+                    size: Size::new(10, 10),
+                    files: 1,
+                    is_dir: false,
+                }],
+                ..Breakdown::default()
+            },
+            largest: Vec::new(),
+        })));
+
+        let _ = state.update(Message::Descend(0));
+        let _ = state.update(Message::Descend(99));
+
+        assert_eq!(state.storage().trail, vec![PathBuf::from("/tmp")]);
+    }
+
+    #[test]
+    fn a_breadcrumb_click_trims_the_trail_back_to_that_depth() {
+        let (mut state, _) = State::boot();
+        for path in ["/a", "/a/b", "/a/b/c"] {
+            let _ = state.update(Message::Explore(PathBuf::from(path)));
+        }
+        assert_eq!(state.storage().trail.len(), 3);
+
+        let _ = state.update(Message::Ascend(0));
+
+        assert_eq!(state.storage().trail, vec![PathBuf::from("/a")]);
+    }
+
+    #[test]
+    fn clicking_the_breadcrumb_you_are_already_on_does_nothing() {
+        let (mut state, _) = State::boot();
+        let _ = state.update(Message::Explore(PathBuf::from("/a")));
+
+        let _ = state.update(Message::Ascend(0));
+
+        assert_eq!(state.storage().trail, vec![PathBuf::from("/a")]);
     }
 
     #[test]
