@@ -46,8 +46,13 @@ homepage = "https://github.com/heroesofcode/limpid"
 authors = ["Pedro Henrique <13969802+pedrohfp@users.noreply.github.com>"]
 
 [workspace.dependencies]
-limpid-core = { path = "crates/limpid-core", version = "0.1.0" }
-limpid-theme = { path = "crates/limpid-theme", version = "0.1.0" }
+# No `version` on these. They are path dependencies of crates that are never
+# published, so a version requirement buys nothing and has to be kept in step
+# by hand — release-please bumps the packages and the lock but not this, so
+# the first release would have left `^0.1.0` pointing at 0.2.0 and the
+# workspace would not resolve at all.
+limpid-core = { path = "crates/limpid-core" }
+limpid-theme = { path = "crates/limpid-theme" }
 
 anyhow = "1.0"
 thiserror = "2.0"
