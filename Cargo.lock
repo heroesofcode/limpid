@@ -1911,6 +1911,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "limpid"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "iced",
+ "limpid-core",
+ "limpid-theme",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "limpid-cli"
 version = "0.1.0"
 dependencies = [
@@ -1938,19 +1951,6 @@ dependencies = [
  "thiserror 2.0.21",
  "tracing",
  "trash",
-]
-
-[[package]]
-name = "limpid-gui"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "iced",
- "limpid-core",
- "limpid-theme",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

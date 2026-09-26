@@ -1,18 +1,43 @@
+# The application is the root package, and the libraries are workspace
+# members. Not just tidiness: release-please's Rust support needs the
+# configured package path to be a real manifest, and a virtual workspace at
+# the root gives it nothing to update or to derive a version from.
+[package]
+name = "limpid"
+description = "A system cleaner and disk-space analyser for Linux"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/heroesofcode/limpid"
+homepage = "https://github.com/heroesofcode/limpid"
+authors = ["Pedro Henrique <13969802+pedrohfp@users.noreply.github.com>"]
+readme = "README.md"
+
+[[bin]]
+name = "limpid"
+path = "src/main.rs"
+
+[dependencies]
+limpid-core.workspace = true
+limpid-theme.workspace = true
+anyhow.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+tokio = { version = "1", features = ["rt", "time"] }
+iced = { version = "0.14", features = ["canvas", "tokio", "svg", "advanced"] }
+
 [workspace]
 resolver = "3"
 members = [
     "crates/limpid-core",
     "crates/limpid-theme",
     "crates/limpid-cli",
-    "crates/limpid-gui",
     "crates/limpid-helper",
 ]
 
 [workspace.package]
-# Deliberately no `version` here. release-please's Rust support updates each
-# member manifest and the lock file together, and it cannot follow
-# `version.workspace = true` — it reads the inherited value as untagged and
-# refuses to open a release pull request at all.
 edition = "2024"
 rust-version = "1.85"
 license = "MIT"
