@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/heroesofcode/limpid/compare/v0.2.0...v0.2.1) (2026-09-26)
+
+
+### Bug fixes
+
+* build the release binaries in the run that creates the release ([#12](https://github.com/heroesofcode/limpid/issues/12)) ([a5faf76](https://github.com/heroesofcode/limpid/commit/a5faf767e822d9911bf833f3494cefb5d5b52bb3))
+
 ## [0.2.0](https://github.com/heroesofcode/limpid/compare/v0.1.0...v0.2.0) (2026-09-26)
 
 
