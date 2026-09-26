@@ -11,6 +11,14 @@ the active theme and follows it live when you switch.
 
 ![Limpid showing a scan](docs/overview.png)
 
+It is built for a tiling window manager, so it does not assume it gets to
+pick its own size. The sidebar becomes a row of tabs, the ring and its
+figures stack, rows lose their second column and the primary action takes a
+line of its own — each at the width where the previous arrangement actually
+stops fitting, rather than at a round number.
+
+<img src="docs/narrow.png" alt="The same screen in a 240 pixel column" width="240">
+
 ## Why another one
 
 Linux cleaning tools split into two halves that never meet. The analysers are

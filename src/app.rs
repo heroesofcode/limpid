@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use iced::widget::{Space, column, container, row, scrollable, text};
+use iced::widget::{Space, column, container, responsive, row, scrollable, text};
 use iced::{Element, Length, Subscription, Task};
 
 use limpid_core::analyse::{self, Survey};
@@ -17,6 +17,7 @@ use limpid_core::privileged::{Report, Request, Runner};
 use limpid_core::walk::WalkOptions;
 use limpid_theme::{Palette, Source, Theme as LimpidTheme};
 
+use crate::layout::Metrics;
 use crate::style;
 use crate::typography as ty;
 use crate::view;
@@ -429,38 +430,80 @@ impl State {
     }
 
     /// Draw the window.
+    ///
+    /// Wrapped in `responsive` because the whole shape of the interface
+    /// depends on how much room there is — in a tiling window manager the
+    /// window does not choose its own size and can be handed a quarter of a
+    /// small screen. Everything below takes the resulting [`Metrics`] rather
+    /// than assuming a width.
     pub fn view(&self) -> Element<'_, Message> {
         let palette = self.palette();
 
-        let body = match self.page {
-            Page::Overview => view::overview::view(palette, self),
-            Page::Storage => view::storage::view(palette, self.storage()),
-            Page::Settings => view::settings::view(palette, &self.theme),
-        };
+        responsive(move |size| {
+            let metrics = Metrics::of(size);
 
-        let header = column![
-            text(self.page.title())
-                .size(ty::HEADING)
-                .style(style::heading(palette)),
-            text(self.page.subtitle())
-                .size(ty::BODY_SMALL)
-                .style(style::secondary(palette)),
-        ]
-        .spacing(2);
+            let body = match self.page {
+                Page::Overview => view::overview::view(palette, metrics, self),
+                Page::Storage => view::storage::view(palette, metrics, self.storage()),
+                Page::Settings => view::settings::view(palette, metrics, &self.theme),
+            };
 
-        let content = column![header, body].spacing(ty::GAP_WIDE);
+            let header = column![
+                text(self.page.title())
+                    .size(metrics.heading())
+                    .style(style::heading(palette)),
+                text(self.page.subtitle())
+                    .size(ty::BODY_SMALL)
+                    .style(style::secondary(palette))
+                    .width(Length::Fill),
+            ]
+            // Fill, not the default Shrink. A `Fill` text inside a `Shrink`
+            // column resolves to the text's natural width, so the whole
+            // chain from here down has to be Fill or nothing wraps — it
+            // just runs off the edge.
+            .spacing(2)
+            .width(Length::Fill);
 
-        let scrolled = scrollable(container(content).padding(ty::MARGIN).width(Length::Fill))
+            let content = column![header, body]
+                .spacing(metrics.gap)
+                .width(Length::Fill);
+
+            let scrolled = scrollable(
+                container(content)
+                    .padding(metrics.margin)
+                    .width(Length::Fill),
+            )
             .style(style::scroller(palette))
             .height(Length::Fill);
 
-        container(row![
-            view::sidebar::view(palette, self.page, self.source()),
-            container(scrolled).width(Length::Fill).height(Length::Fill),
-        ])
-        .style(style::root(palette))
-        .width(Length::Fill)
-        .height(Length::Fill)
+            // Beside the content when there is room for it, above when there
+            // is not. Both containers are Fill on purpose: `row!` and
+            // `column!` are Shrink by default, and a Shrink ancestor turns
+            // every Fill below it into "as wide as the content wants".
+            let shell: Element<'_, Message> = if metrics.sidebar {
+                row![
+                    view::sidebar::column(palette, self.page, self.source()),
+                    container(scrolled).width(Length::Fill).height(Length::Fill),
+                ]
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+            } else {
+                column![
+                    view::sidebar::tabs(palette, metrics, self.page),
+                    container(scrolled).width(Length::Fill).height(Length::Fill),
+                ]
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+            };
+
+            container(shell)
+                .style(style::root(palette))
+                .width(Length::Fill)
+                .height(Length::Fill)
+                .into()
+        })
         .into()
     }
 
