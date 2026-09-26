@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.0](https://github.com/heroesofcode/limpid/compare/v0.2.1...v0.3.0) (2026-09-26)
+
+
+### Features
+
+* lay the interface out for the room it actually has ([#14](https://github.com/heroesofcode/limpid/issues/14)) ([c4fe746](https://github.com/heroesofcode/limpid/commit/c4fe7468953b9e4299b7314a0299a0865d539bc2))
+
 ## [0.2.1](https://github.com/heroesofcode/limpid/compare/v0.2.0...v0.2.1) (2026-09-26)
 
 
