@@ -1,6 +1,6 @@
 # Maintainer: Pedro Henrique <13969802+pedrohfp@users.noreply.github.com>
 pkgname=limpid
-pkgver=0.1.0 # x-release-please-version
+pkgver=0.2.0 # x-release-please-version
 pkgrel=1
 pkgdesc="System cleaner and disk-space analyser that understands btrfs snapshots, pacman and browser caches"
 arch=('x86_64' 'aarch64')
