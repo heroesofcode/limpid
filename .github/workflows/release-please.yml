@@ -3,6 +3,14 @@ name: release-please
 on:
   push:
     branches: [main]
+  # So the binaries can be rebuilt for a tag that already exists, which is
+  # the only way to repair a release whose upload failed.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to build and attach binaries to
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -11,13 +19,63 @@ permissions:
 jobs:
   release-please:
     runs-on: ubuntu-latest
+    if: github.event_name == 'push'
+    outputs:
+      released: ${{ steps.release.outputs.release_created }}
+      tag: ${{ steps.release.outputs.tag_name }}
     steps:
       - uses: googleapis/release-please-action@v5
+        id: release
         with:
-          # A PR opened with the default GITHUB_TOKEN does not trigger other
-          # workflows, which would leave the release PR without the `ci` check
-          # that main requires. Set RELEASE_PLEASE_TOKEN to a PAT if that bites;
-          # closing and reopening the PR is the no-secret way out.
+          # GitHub does not trigger workflows for events raised by the
+          # default token, so the release pull request opens without the
+          # `ci` check that main requires. Closing and reopening it is the
+          # no-secret way to get the check to run; a PAT here avoids that.
           token: ${{ secrets.RELEASE_PLEASE_TOKEN || secrets.GITHUB_TOKEN }}
           config-file: release-please-config.json
           manifest-file: .release-please-manifest.json
+
+  binaries:
+    # Same reason, one step further on: a `release: published` event raised
+    # by the default token does not start a separate workflow either, so the
+    # binaries are built here, in the run that created the release, rather
+    # than in one waiting to be triggered by it.
+    needs: [release-please]
+    if: always() && (needs.release-please.outputs.released == 'true' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98
+        with:
+          ref: ${{ inputs.tag || needs.release-please.outputs.tag }}
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libwayland-dev libxkbcommon-dev libvulkan-dev \
+            libx11-dev libxcursor-dev libxrandr-dev libxi-dev
+
+      - uses: Swatinem/rust-cache@f51f967e158417aafa338a1e46ab22095f07aa01
+
+      - name: Build
+        run: cargo build --release --workspace --locked
+
+      - name: Package
+        id: package
+        run: |
+          tag="${{ inputs.tag || needs.release-please.outputs.tag }}"
+          staging="limpid-${tag#v}-x86_64-linux"
+          mkdir -p "$staging"
+          cp target/release/limpid target/release/limpid-cli \
+             target/release/limpid-helper "$staging/"
+          cp -r data README.md LICENSE Makefile "$staging/"
+          tar -czf "${staging}.tar.gz" "$staging"
+          sha256sum "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Attach to the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release upload "${{ steps.package.outputs.tag }}" \
+            limpid-*.tar.gz limpid-*.sha256 --clobber
