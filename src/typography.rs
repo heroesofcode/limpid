@@ -29,8 +29,8 @@ pub const GAP_TIGHT: f32 = STEP;
 pub const GAP: f32 = STEP * 2.0;
 /// Gap between sections.
 pub const GAP_WIDE: f32 = STEP * 3.0;
-/// Page margin.
-pub const MARGIN: f32 = STEP * 4.0;
 
+// Page margins and card padding are not here: they depend on how much room
+// there is, and live in `layout::Metrics`.
 /// Width of the navigation column.
 pub const SIDEBAR_WIDTH: f32 = 216.0;

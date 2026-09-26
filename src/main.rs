@@ -4,6 +4,7 @@
 #![warn(missing_docs)]
 
 mod app;
+mod layout;
 mod style;
 mod typography;
 mod view;
@@ -11,13 +12,17 @@ mod widget;
 
 use app::State;
 
-/// Starting size. Wide enough for the ring and its figures side by side, and
-/// short enough to open whole on a 1280x720 laptop — which is the smallest
-/// screen this is likely to meet, and smaller than it looks once a bar and
-/// window gaps are taken out.
+/// Starting size, for the case where the window manager lets the window
+/// choose. Wide enough for the ring and its figures side by side, and short
+/// enough to open whole on a 1280x720 laptop.
 const WINDOW: iced::Size = iced::Size::new(1020.0, 660.0);
-/// Below this the sidebar and a card cannot coexist.
-const MINIMUM: iced::Size = iced::Size::new(680.0, 460.0);
+/// The smallest the interface still works at.
+///
+/// A tiling compositor honours this, which means a floor set too high makes
+/// the window overflow its tile rather than fit it. Four columns on a 1152
+/// pixel screen is 288 each, so the floor is below that and the layout is
+/// expected to cope rather than the window to refuse.
+const MINIMUM: iced::Size = iced::Size::new(240.0, 240.0);
 
 /// Wayland app id, which has to match the desktop entry's file name for the
 /// compositor to associate the window with it. Without one the window has no
