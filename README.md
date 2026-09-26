@@ -143,10 +143,10 @@ some capability for it:
 ## Layout
 
 ```
+src/                   the desktop application
 crates/limpid-core     scanning, classification, execution
 crates/limpid-theme    palette resolution and live theme reload
 crates/limpid-cli      headless front-end, used by the test suite
-crates/limpid-gui      the desktop application
 crates/limpid-helper   privileged helper, invoked through polkit
 ```
 
