@@ -147,8 +147,10 @@ impl Executor {
 
         for path in &item.paths {
             // Checked here, against the filesystem as it is now, rather than
-            // when the plan was assembled.
-            if let Err(refusal) = self.guard.check(path) {
+            // when the plan was assembled — and under the permission the
+            // item was created with, so a scanner's path can never be given
+            // the looser check meant for something the user pointed at.
+            if let Err(refusal) = self.guard.check_with(path, item.permission) {
                 outcome.problems.push(Problem::Refused(refusal));
                 continue;
             }
@@ -438,6 +440,64 @@ mod tests {
 
         assert!(matches!(outcome.problems[0], Problem::InUse { .. }));
         assert_eq!(outcome.reclaimed, Size::ZERO);
+    }
+
+    #[test]
+    fn a_chosen_file_outside_every_boundary_is_removed() {
+        // The whole point of the second permission: the storage view shows
+        // the disk, and nothing there is inside a boundary.
+        let fixture = tempfile::tempdir().unwrap();
+        let roots = Roots::under(fixture.path());
+        let film = roots.home("Videos/holiday.mkv");
+        write(&film, 4096);
+
+        let plan = Plan::from_chosen(
+            [(film.clone(), Size::new(4096, 4096))],
+            crate::plan::Disposal::Delete,
+        );
+        let outcome = Executor::applying(&roots).run(&plan);
+
+        assert!(outcome.is_clean(), "{:?}", outcome.problems);
+        assert!(!film.exists());
+    }
+
+    #[test]
+    fn a_chosen_path_is_still_refused_where_no_choice_should_reach() {
+        let fixture = tempfile::tempdir().unwrap();
+        let roots = Roots::under(fixture.path());
+        let key = roots.home(".ssh/id_ed25519");
+        write(&key, 400);
+
+        let plan = Plan::from_chosen(
+            [(key.clone(), Size::new(400, 400))],
+            crate::plan::Disposal::Delete,
+        );
+        let outcome = Executor::applying(&roots).run(&plan);
+
+        assert!(matches!(
+            outcome.problems[0],
+            Problem::Refused(Refusal::Sacred(_))
+        ));
+        assert!(key.exists());
+    }
+
+    #[test]
+    fn a_catalogued_item_does_not_get_the_looser_check() {
+        // Same path, same executor; only the permission differs.
+        let fixture = tempfile::tempdir().unwrap();
+        let roots = Roots::under(fixture.path());
+        let film = roots.home("Videos/holiday.mkv");
+        write(&film, 4096);
+
+        let plan =
+            Plan::from_targets(&[Target::new("somehow", Kind::Cache, Risk::Safe).path(&film)]);
+        let outcome = Executor::applying(&roots).run(&plan);
+
+        assert!(matches!(
+            outcome.problems[0],
+            Problem::Refused(Refusal::OutOfBounds(_))
+        ));
+        assert!(film.exists());
     }
 
     #[test]

@@ -7,6 +7,7 @@
 
 use std::path::PathBuf;
 
+use crate::guard::Permission;
 use crate::model::{Kind, Risk, Target};
 use crate::privileged::Operation;
 use crate::size::Size;
@@ -65,6 +66,12 @@ pub struct Item {
     pub disposal: Disposal,
     /// A directory that must have nothing open inside it when this runs.
     pub requires_idle: Option<PathBuf>,
+    /// How this came to be here, which decides how the guard checks it.
+    ///
+    /// Carried rather than decided at the point of removal, so there is no
+    /// call site that can pick the looser check for something a scanner
+    /// produced.
+    pub permission: Permission,
     /// What the scan measured, for comparison against what actually happened.
     pub expected: Size,
 }
@@ -115,6 +122,7 @@ impl Plan {
                     paths: target.paths.clone(),
                     disposal: Disposal::for_kind(target.kind),
                     requires_idle: target.requires_idle.clone(),
+                    permission: Permission::Catalogued,
                     expected: target.size,
                 }),
                 // Needs elevation but nothing knows how to do it. Dropped
@@ -125,6 +133,42 @@ impl Plan {
         }
 
         plan
+    }
+
+    /// Build a plan from files the user selected on screen.
+    ///
+    /// Separate from [`Plan::from_targets`] on purpose. These paths were
+    /// never produced by a scanner and are not inside any boundary; what
+    /// makes them safe is that a person pointed at each one. That fact is
+    /// recorded here as [`Permission::Chosen`] and read again by the
+    /// executor, so it cannot be lost in between.
+    ///
+    /// The default disposal is the trash. This is the user's own data, not
+    /// a regenerable cache, and on the same filesystem trashing it is a
+    /// rename — instant even for a file of several gigabytes.
+    pub fn from_chosen(
+        chosen: impl IntoIterator<Item = (PathBuf, Size)>,
+        disposal: Disposal,
+    ) -> Self {
+        let items = chosen
+            .into_iter()
+            .map(|(path, expected)| Item {
+                name: path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.display().to_string()),
+                paths: vec![path],
+                disposal,
+                requires_idle: None,
+                permission: Permission::Chosen,
+                expected,
+            })
+            .collect();
+
+        Self {
+            items,
+            ..Self::default()
+        }
     }
 
     /// Total size the plan expects to reclaim, both halves together.
@@ -250,6 +294,41 @@ mod tests {
         assert_eq!(plan.items.len(), 1);
         assert_eq!(plan.items[0].name, "free");
         assert!(!Selection::SAFE.includes(&targets[1]));
+    }
+
+    #[test]
+    fn a_chosen_file_carries_its_own_permission_and_goes_to_the_trash() {
+        let plan = Plan::from_chosen(
+            [(
+                PathBuf::from("/home/x/Videos/holiday.mkv"),
+                Size::new(4096, 4096),
+            )],
+            Disposal::Trash,
+        );
+
+        assert_eq!(plan.items.len(), 1);
+        assert_eq!(plan.items[0].name, "holiday.mkv");
+        assert_eq!(plan.items[0].permission, Permission::Chosen);
+        assert_eq!(plan.items[0].disposal, Disposal::Trash);
+        assert!(plan.items[0].requires_idle.is_none());
+    }
+
+    #[test]
+    fn a_catalogued_target_never_becomes_a_chosen_one() {
+        let plan = Plan::from_targets(&[target("cache", Kind::Cache, Risk::Safe)]);
+
+        assert_eq!(plan.items[0].permission, Permission::Catalogued);
+    }
+
+    #[test]
+    fn a_chosen_file_can_be_removed_outright_when_asked_for_explicitly() {
+        let plan = Plan::from_chosen(
+            [(PathBuf::from("/home/x/big.iso"), Size::new(10, 10))],
+            Disposal::Delete,
+        );
+
+        assert_eq!(plan.items[0].disposal, Disposal::Delete);
+        assert!(plan.has_permanent_deletions());
     }
 
     #[test]

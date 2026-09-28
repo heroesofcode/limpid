@@ -5,9 +5,24 @@
 //! scanner — a path joined against the wrong root, an empty string that
 //! collapses to `/` — should cost a refusal, not a home directory.
 //!
-//! The rule is narrow on purpose. A path is removable only if it sits
-//! strictly inside one of a small set of known directories, is not one of
-//! those directories itself, and cannot climb out.
+//! The rule is narrow on purpose. A path a *scanner* produced is removable
+//! only if it sits strictly inside one of a small set of known directories,
+//! is not one of those directories itself, and cannot climb out.
+//!
+//! A path the **user** pointed at is a different question, and it needs a
+//! different answer. The storage view shows the whole disk, so nothing there
+//! is inside a boundary, and widening the boundary list to make that work
+//! would gut the protection for everything else. The distinction that
+//! resolves it: this guard exists to catch the *program* being wrong, and a
+//! file someone selected on screen is not a guess. So an explicit choice
+//! keeps every rule that does not depend on guessing — absolute, no climbing
+//! out, no symlink anywhere along the way, no protected name, inside the
+//! home directory, and never something no cleaner should be touching — and
+//! drops only the boundary list.
+//!
+//! Which check applies is not left to the call site. It travels with the
+//! work as a [`Permission`], set when the item was created and read when it
+//! is acted on.
 
 use std::path::{Component, Path, PathBuf};
 
@@ -31,6 +46,9 @@ pub enum Refusal {
     /// Is a symlink, which would act on something elsewhere.
     #[error("{0} is a symlink")]
     Symlink(PathBuf),
+    /// Is somewhere nothing may be removed from, however it was asked for.
+    #[error("{0} holds credentials; Limpid does not remove from there")]
+    Sacred(PathBuf),
     /// Carries a name that is never removable, wherever it appears.
     #[error("{0} is protected by name")]
     Protected(PathBuf),
@@ -45,7 +63,8 @@ impl Refusal {
             | Self::OutOfBounds(path)
             | Self::IsABoundary(path)
             | Self::Symlink(path)
-            | Self::Protected(path) => path,
+            | Self::Protected(path)
+            | Self::Sacred(path) => path,
         }
     }
 }
@@ -81,11 +100,32 @@ const PROTECTED_NAMES: &[&str] = &[
     "prefs.js",
 ];
 
+/// Directories nothing may be removed from, however it was arrived at.
+///
+/// Not about disk space, and not a judgement about what the user wants. A
+/// cleaner that can be talked into emptying `~/.ssh` is a cleaner with a
+/// vulnerability, and no amount of "but they clicked it" makes that
+/// acceptable.
+const SACRED: &[&str] = &[".ssh", ".gnupg", ".password-store", ".local/share/keyrings"];
+
+/// How a path came to be in a plan, which decides how it is checked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Permission {
+    /// A scanner produced it. Must sit inside a known boundary.
+    Catalogued,
+    /// The user pointed at it on screen. The boundary list does not apply,
+    /// everything else does.
+    Chosen,
+}
+
 /// Decides whether a path may be removed.
 #[derive(Debug, Clone)]
 pub struct Guard {
     /// Directories whose *contents* may be removed.
     boundaries: Vec<PathBuf>,
+    /// The user's home directory, which bounds an explicit choice.
+    home: PathBuf,
 }
 
 impl Guard {
@@ -123,7 +163,10 @@ impl Guard {
         boundaries.push(roots.home(".mozilla/firefox"));
         boundaries.sort();
         boundaries.dedup();
-        Self { boundaries }
+        Self {
+            boundaries,
+            home: roots.home.clone(),
+        }
     }
 
     /// The directories this guard permits removal inside.
@@ -131,8 +174,59 @@ impl Guard {
         &self.boundaries
     }
 
+    /// Check a path that is about to be removed, under the permission it
+    /// was created with.
+    pub fn check_with(&self, path: &Path, permission: Permission) -> Result<(), Refusal> {
+        match permission {
+            Permission::Catalogued => self.check(path),
+            Permission::Chosen => self.check_chosen(path),
+        }
+    }
+
+    /// Check a path the user picked from the storage view.
+    ///
+    /// Everything that does not depend on the program having guessed right
+    /// still applies. What is dropped is the boundary list, and only that.
+    pub fn check_chosen(&self, path: &Path) -> Result<(), Refusal> {
+        self.check_universal(path)?;
+
+        // Outside the home directory is not the user's to give away from
+        // here: it is either someone else's or the system's.
+        if !path.starts_with(&self.home) || path == self.home {
+            return Err(Refusal::OutOfBounds(path.to_owned()));
+        }
+
+        if SACRED
+            .iter()
+            .any(|sacred| path.starts_with(self.home.join(sacred)))
+        {
+            return Err(Refusal::Sacred(path.to_owned()));
+        }
+
+        Ok(())
+    }
+
     /// Check a path that is about to be removed.
     pub fn check(&self, path: &Path) -> Result<(), Refusal> {
+        self.check_universal(path)?;
+
+        if self.boundaries.iter().any(|boundary| boundary == path) {
+            return Err(Refusal::IsABoundary(path.to_owned()));
+        }
+
+        if !self
+            .boundaries
+            .iter()
+            .any(|boundary| path.starts_with(boundary))
+        {
+            return Err(Refusal::OutOfBounds(path.to_owned()));
+        }
+
+        Ok(())
+    }
+
+    /// The rules that hold however the path was arrived at.
+    fn check_universal(&self, path: &Path) -> Result<(), Refusal> {
         if !path.is_absolute() {
             return Err(Refusal::NotAbsolute(path.to_owned()));
         }
@@ -150,18 +244,6 @@ impl Guard {
             .is_some_and(|name| PROTECTED_NAMES.contains(&name))
         {
             return Err(Refusal::Protected(path.to_owned()));
-        }
-
-        if self.boundaries.iter().any(|boundary| boundary == path) {
-            return Err(Refusal::IsABoundary(path.to_owned()));
-        }
-
-        if !self
-            .boundaries
-            .iter()
-            .any(|boundary| path.starts_with(boundary))
-        {
-            return Err(Refusal::OutOfBounds(path.to_owned()));
         }
 
         // Every component, not just the leaf. The boundary check above is
@@ -368,6 +450,111 @@ mod tests {
             guard.check(&sibling),
             Err(Refusal::OutOfBounds(_))
         ));
+    }
+
+    #[test]
+    fn a_chosen_file_is_allowed_where_a_catalogued_one_would_not_be() {
+        let (_fixture, roots, guard) = fixture();
+        let film = roots.home("Videos/holiday.mkv");
+        std::fs::create_dir_all(film.parent().unwrap()).unwrap();
+        std::fs::write(&film, b"x").unwrap();
+
+        // The scanner has no business there; the user pointing at it does.
+        assert!(matches!(guard.check(&film), Err(Refusal::OutOfBounds(_))));
+        assert!(guard.check_chosen(&film).is_ok());
+    }
+
+    #[test]
+    fn an_explicit_choice_still_cannot_leave_the_home_directory() {
+        let (_fixture, _roots, guard) = fixture();
+
+        for path in ["/etc/passwd", "/usr/lib/libc.so", "/", "/var/log/journal"] {
+            assert!(
+                matches!(
+                    guard.check_chosen(Path::new(path)),
+                    Err(Refusal::OutOfBounds(_))
+                ),
+                "{path} should have been refused",
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_choice_cannot_be_the_home_directory_itself() {
+        let (_fixture, roots, guard) = fixture();
+
+        assert!(matches!(
+            guard.check_chosen(&roots.home),
+            Err(Refusal::OutOfBounds(_))
+        ));
+    }
+
+    #[test]
+    fn credentials_are_refused_however_hard_someone_points_at_them() {
+        let (_fixture, roots, guard) = fixture();
+
+        for relative in [
+            ".ssh",
+            ".ssh/id_ed25519",
+            ".gnupg/pubring.kbx",
+            ".password-store",
+        ] {
+            let path = roots.home(relative);
+            assert!(
+                matches!(guard.check_chosen(&path), Err(Refusal::Sacred(_))),
+                "{relative} should have been refused",
+            );
+        }
+    }
+
+    #[test]
+    fn an_explicit_choice_keeps_every_rule_that_is_not_about_boundaries() {
+        let (_fixture, roots, guard) = fixture();
+        std::fs::create_dir_all(roots.home("Videos")).unwrap();
+        std::fs::create_dir_all(roots.home("Documents")).unwrap();
+
+        // Relative, climbing, and symlinked are refused just the same.
+        assert!(matches!(
+            guard.check_chosen(Path::new("Videos/x.mkv")),
+            Err(Refusal::NotAbsolute(_))
+        ));
+        assert!(matches!(
+            guard.check_chosen(&roots.home("Videos/../../etc")),
+            Err(Refusal::Climbing(_))
+        ));
+
+        let link = roots.home("Videos/shortcut");
+        std::os::unix::fs::symlink(roots.home("Documents"), &link).unwrap();
+        assert!(matches!(
+            guard.check_chosen(&link),
+            Err(Refusal::Symlink(_))
+        ));
+
+        // And a protected name is protected wherever it turns up.
+        assert!(matches!(
+            guard.check_chosen(&roots.home("Videos/Local State")),
+            Err(Refusal::Protected(_))
+        ));
+    }
+
+    #[test]
+    fn the_permission_decides_which_check_runs() {
+        let (_fixture, roots, guard) = fixture();
+        let film = roots.home("Videos/holiday.mkv");
+        std::fs::create_dir_all(film.parent().unwrap()).unwrap();
+        std::fs::write(&film, b"x").unwrap();
+
+        assert!(guard.check_with(&film, Permission::Chosen).is_ok());
+        assert!(guard.check_with(&film, Permission::Catalogued).is_err());
+
+        // And the reverse: the cache root is a boundary, so it is refused
+        // either way, for different reasons.
+        assert!(
+            guard
+                .check_with(&roots.cache, Permission::Catalogued)
+                .is_err()
+        );
+        assert!(guard.check_with(&roots.cache, Permission::Chosen).is_ok());
     }
 
     #[test]
