@@ -12,8 +12,9 @@ use limpid_core::catalog::{self, Context};
 use limpid_core::execute::{Executor, Outcome};
 use limpid_core::model::{Scan, Target};
 use limpid_core::paths::Roots;
-use limpid_core::plan::{Plan, Selection};
+use limpid_core::plan::{Disposal, Plan, Selection};
 use limpid_core::privileged::{Report, Request, Runner};
+use limpid_core::size::Size;
 use limpid_core::walk::WalkOptions;
 use limpid_theme::{Palette, Source, Theme as LimpidTheme};
 
@@ -96,6 +97,19 @@ pub struct Storage {
     pub survey: Option<Survey>,
     /// Whether a walk is under way.
     pub working: bool,
+    /// Files the user has ticked, by path.
+    ///
+    /// By path and not by row index: a walk that finishes late replaces the
+    /// list underneath, and an index would then point at a different file.
+    /// The generation counter stops the common case; this makes the wrong
+    /// thing unrepresentable rather than merely unlikely.
+    pub selected: BTreeSet<PathBuf>,
+    /// Whether the permanent-deletion confirmation is up.
+    pub confirming_delete: bool,
+    /// Whether a removal is under way.
+    pub removing: bool,
+    /// What the last removal from this page did.
+    pub outcome: Option<Outcome>,
     /// Which walk the result on screen belongs to.
     ///
     /// Walks take seconds and finish out of order, so a slow one started
@@ -110,6 +124,38 @@ impl Storage {
     /// The directory being shown.
     pub fn current(&self) -> Option<&PathBuf> {
         self.trail.last()
+    }
+
+    /// Whether a path is ticked.
+    pub fn is_selected(&self, path: &std::path::Path) -> bool {
+        self.selected.contains(path)
+    }
+
+    /// The ticked files, with the sizes measured for them.
+    ///
+    /// Read back out of the survey on screen rather than remembered, so a
+    /// selection can only ever name something currently visible.
+    fn chosen(&self) -> Vec<(PathBuf, Size)> {
+        let Some(survey) = &self.survey else {
+            return Vec::new();
+        };
+
+        survey
+            .breakdown
+            .children
+            .iter()
+            .chain(&survey.largest)
+            .filter(|entry| !entry.is_dir && self.selected.contains(&entry.path))
+            .map(|entry| (entry.path.clone(), entry.size))
+            // The same file can appear in both lists.
+            .collect::<std::collections::BTreeMap<_, _>>()
+            .into_iter()
+            .collect()
+    }
+
+    /// What acting on the current selection would do.
+    pub fn plan(&self, disposal: Disposal) -> Plan {
+        Plan::from_chosen(self.chosen(), disposal)
     }
 }
 
@@ -166,6 +212,20 @@ pub enum Message {
     Descend(usize),
     /// A breadcrumb was clicked; go back to that depth.
     Ascend(usize),
+    /// A file on the storage page was ticked or unticked.
+    ToggleFile(PathBuf),
+    /// Untick everything on the storage page.
+    ClearSelection,
+    /// Move the ticked files to the trash. Reversible, so it acts directly.
+    TrashSelected,
+    /// Ask before removing the ticked files outright.
+    AskToDelete,
+    /// The permanent-deletion confirmation was dismissed.
+    CancelDelete,
+    /// Remove the ticked files outright.
+    DeleteSelected,
+    /// A removal from the storage page finished.
+    SelectionRemoved(Box<Outcome>),
 }
 
 impl State {
@@ -251,6 +311,30 @@ impl State {
         Plan::from_targets(self.chosen())
     }
 
+    /// Act on the storage page's selection.
+    fn remove_selection(&mut self, disposal: Disposal) -> Task<Message> {
+        let plan = self.storage.plan(disposal);
+        if plan.is_empty() {
+            self.storage.confirming_delete = false;
+            return Task::none();
+        }
+
+        self.storage.confirming_delete = false;
+        self.storage.removing = true;
+        self.storage.outcome = None;
+
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    Executor::applying(&Roots::from_env()).run(&plan)
+                })
+                .await
+                .unwrap_or_default()
+            },
+            |outcome| Message::SelectionRemoved(Box::new(outcome)),
+        )
+    }
+
     /// Tick everything that regenerates itself with no consequence.
     ///
     /// The starting point after every scan: it is the selection a careful
@@ -300,9 +384,14 @@ impl State {
                 Task::none()
             }
             Message::Explore(path) => {
+                // Cleared on every move. A selection that survived
+                // navigation would put files the user cannot see on screen
+                // into the next confirmation.
                 if self.storage.trail.last() != Some(&path) {
                     self.storage.trail.push(path.clone());
+                    self.storage.selected.clear();
                 }
+                self.storage.confirming_delete = false;
                 self.storage.working = true;
                 self.storage.survey = None;
                 self.storage.generation += 1;
@@ -318,6 +407,38 @@ impl State {
                     },
                     move |survey| Message::Explored(generation, Box::new(survey)),
                 )
+            }
+            Message::ToggleFile(path) => {
+                if !self.storage.selected.remove(&path) {
+                    self.storage.selected.insert(path);
+                }
+                Task::none()
+            }
+            Message::ClearSelection => {
+                self.storage.selected.clear();
+                self.storage.confirming_delete = false;
+                Task::none()
+            }
+            Message::AskToDelete => {
+                self.storage.confirming_delete = !self.storage.plan(Disposal::Delete).is_empty();
+                Task::none()
+            }
+            Message::CancelDelete => {
+                self.storage.confirming_delete = false;
+                Task::none()
+            }
+            Message::TrashSelected => self.remove_selection(Disposal::Trash),
+            Message::DeleteSelected => self.remove_selection(Disposal::Delete),
+            Message::SelectionRemoved(outcome) => {
+                self.storage.outcome = Some(*outcome);
+                self.storage.selected.clear();
+                self.storage.removing = false;
+                // Measure again rather than adjust: the figures on screen
+                // are a measurement, and after a removal they are stale.
+                match self.storage.trail.last().cloned() {
+                    Some(path) => Task::done(Message::Explore(path)),
+                    None => Task::none(),
+                }
             }
             Message::Explored(generation, survey) => {
                 // A result from a walk that has been superseded is dropped.
@@ -862,6 +983,137 @@ mod tests {
         let _ = state.update(Message::Descend(99));
 
         assert_eq!(state.storage().trail, vec![PathBuf::from("/tmp")]);
+    }
+
+    /// A survey holding one directory and one file, both selectable-ish.
+    fn survey_with_a_file() -> limpid_core::analyse::Survey {
+        use limpid_core::analyse::{Breakdown, Entry, Survey};
+        use limpid_core::size::Size;
+
+        let entry = |name: &str, is_dir: bool, bytes: u64| Entry {
+            path: PathBuf::from(format!("/home/x/{name}")),
+            name: name.to_owned(),
+            size: Size::new(bytes, bytes),
+            files: 1,
+            is_dir,
+        };
+
+        Survey {
+            breakdown: Breakdown {
+                children: vec![entry("Videos", true, 900), entry("big.iso", false, 4096)],
+                ..Breakdown::default()
+            },
+            largest: vec![entry("big.iso", false, 4096)],
+        }
+    }
+
+    fn state_on_storage() -> State {
+        let (mut state, _) = State::boot();
+        let _ = state.update(Message::Explore(PathBuf::from("/home/x")));
+        let generation = state.storage().generation;
+        let _ = state.update(Message::Explored(
+            generation,
+            Box::new(survey_with_a_file()),
+        ));
+        state
+    }
+
+    #[test]
+    fn ticking_a_file_on_the_storage_page_is_a_toggle() {
+        let mut state = state_on_storage();
+        let file = PathBuf::from("/home/x/big.iso");
+
+        let _ = state.update(Message::ToggleFile(file.clone()));
+        assert!(state.storage().is_selected(&file));
+
+        let _ = state.update(Message::ToggleFile(file.clone()));
+        assert!(!state.storage().is_selected(&file));
+    }
+
+    #[test]
+    fn a_selection_becomes_a_chosen_plan_that_goes_to_the_trash() {
+        use limpid_core::guard::Permission;
+
+        let mut state = state_on_storage();
+        let _ = state.update(Message::ToggleFile(PathBuf::from("/home/x/big.iso")));
+
+        let plan = state.storage().plan(Disposal::Trash);
+
+        assert_eq!(plan.items.len(), 1);
+        assert_eq!(plan.items[0].permission, Permission::Chosen);
+        assert_eq!(plan.items[0].disposal, Disposal::Trash);
+        // The same file is in both the children and the largest list; it
+        // must be counted once.
+        assert_eq!(plan.expected().on_disk, 4096);
+    }
+
+    #[test]
+    fn a_selection_cannot_name_a_file_the_user_has_navigated_away_from() {
+        let mut state = state_on_storage();
+        let _ = state.update(Message::ToggleFile(PathBuf::from("/home/x/big.iso")));
+        assert!(!state.storage().plan(Disposal::Trash).is_empty());
+
+        let _ = state.update(Message::Explore(PathBuf::from("/home/x/Videos")));
+
+        assert!(state.storage().selected.is_empty());
+        assert!(state.storage().plan(Disposal::Trash).is_empty());
+    }
+
+    #[test]
+    fn a_selection_that_would_delete_nothing_raises_no_confirmation() {
+        let mut state = state_on_storage();
+
+        let _ = state.update(Message::AskToDelete);
+
+        assert!(!state.storage().confirming_delete);
+    }
+
+    #[test]
+    fn the_permanent_deletion_confirmation_can_be_backed_out_of() {
+        let mut state = state_on_storage();
+        let _ = state.update(Message::ToggleFile(PathBuf::from("/home/x/big.iso")));
+
+        let _ = state.update(Message::AskToDelete);
+        assert!(state.storage().confirming_delete);
+
+        let _ = state.update(Message::CancelDelete);
+        assert!(!state.storage().confirming_delete);
+        assert!(!state.storage().removing);
+    }
+
+    #[test]
+    fn trashing_acts_directly_because_it_is_reversible() {
+        let mut state = state_on_storage();
+        let _ = state.update(Message::ToggleFile(PathBuf::from("/home/x/big.iso")));
+
+        let task = state.update(Message::TrashSelected);
+
+        assert!(state.storage().removing);
+        assert!(!state.storage().confirming_delete);
+        drop(task);
+    }
+
+    #[test]
+    fn a_finished_removal_clears_the_selection_and_measures_again() {
+        let mut state = state_on_storage();
+        let _ = state.update(Message::ToggleFile(PathBuf::from("/home/x/big.iso")));
+        let _ = state.update(Message::TrashSelected);
+
+        let task = state.update(Message::SelectionRemoved(Box::default()));
+
+        assert!(state.storage().selected.is_empty());
+        assert!(state.storage().outcome.is_some());
+        assert!(!state.storage().removing);
+        drop(task);
+    }
+
+    #[test]
+    fn a_directory_is_never_part_of_a_selection_plan() {
+        // Directories have no checkbox, and nothing else may put one in.
+        let mut state = state_on_storage();
+        let _ = state.update(Message::ToggleFile(PathBuf::from("/home/x/Videos")));
+
+        assert!(state.storage().plan(Disposal::Trash).is_empty());
     }
 
     #[test]

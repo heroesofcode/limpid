@@ -76,6 +76,19 @@ codebase already:
 If text is overflowing instead of wrapping, the bug is almost always a
 missing `.width(Length::Fill)` on an *ancestor*, not on the text.
 
+**And a second cause that looks identical.** Once the widths are right, a
+single unbreakable token still overflows, because the default
+`Wrapping::Word` has nowhere to break it. A file name is one long token as
+often as not — `Final Fantasy X (www.romsportugues.com).iso` — and it runs
+past its column and draws on top of whatever sits beside it.
+
+Anything that displays a path or a file name needs
+`.wrapping(Wrapping::WordOrGlyph)`.
+
+The two failures look the same on screen and the first one is the more
+common, which makes it easy to fix the ancestor, see no change, and assume
+the fix did not work. Check both.
+
 ## Checklist — run this before calling any layout change done
 
 1. **Test the bands.** Add or extend a test in `src/layout.rs` if you added a
@@ -90,7 +103,11 @@ missing `.width(Length::Fill)` on an *ancestor*, not on the text.
    `Shrink` that should be `Fill`.
 5. **Nothing clipped.** Every control that exists at 1020 px must still be
    reachable at 288 px — stacked, wrapped or on its own line, but present.
-6. **Run it and look.** `cargo run` and resize, or tile it. The layout tests
+6. **Real content, not placeholder content.** A row that holds up under
+   `document.pdf` falls apart under the actual name of a file someone
+   downloaded. Both overflow bugs above were invisible until a real path
+   was on screen.
+7. **Run it and look.** `cargo run` and resize, or tile it. The layout tests
    prove the arithmetic; they do not prove it looks right.
 
 ## When adding a new view

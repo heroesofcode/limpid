@@ -15,6 +15,7 @@ use crate::app::{Cleaned, Message, Progress, State, TargetId, placeholder};
 use crate::layout::Metrics;
 use crate::style;
 use crate::typography as ty;
+use crate::view::{action, tick_spacer};
 use crate::widget::gauge::{Bar, Gauge};
 
 /// Hues cycled through the category cards, so that two groups next to each
@@ -568,7 +569,7 @@ fn target_row<'a>(
             .on_toggle(move |_| Message::Toggle(id))
             .into()
     } else {
-        Space::new().width(Length::Fixed(22.0)).into()
+        tick_spacer()
     };
 
     // The reason it cannot be touched displaces the description: "close
@@ -625,20 +626,6 @@ fn target_row<'a>(
         .padding([10, 12])
         .width(Length::Fill)
         .into()
-}
-
-/// A button whose label is centred only when the button spans the width.
-///
-/// A `Fill` label inside a button sitting in a row makes the *button* take
-/// the row's slack, which is right when it is the only thing on its line and
-/// wrong when it is not.
-fn action<'a>(label: &'a str, full_width: bool) -> button::Button<'a, Message> {
-    let text = text(label).size(ty::BODY);
-    if full_width {
-        button(text.width(Length::Fill).center()).width(Length::Fill)
-    } else {
-        button(text)
-    }
 }
 
 /// A small coloured label.
