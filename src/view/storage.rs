@@ -367,6 +367,45 @@ fn result<'a>(palette: Palette, metrics: Metrics, outcome: &Outcome) -> Element<
         .into()
 }
 
+/// The two per-file actions, for windows with room to show them.
+///
+/// Only on the largest-files list. In the list of what is directly inside
+/// this directory, "open the containing folder" would open the directory
+/// already on screen.
+///
+/// Hidden below the two-column band. At that width the name and the size
+/// are already competing for room, and a 16-pixel target in a 240-pixel
+/// column is a poor one even when it fits.
+fn file_actions<'a>(
+    palette: Palette,
+    metrics: Metrics,
+    entry: &Entry,
+) -> Option<Element<'a, Message>> {
+    if !metrics.two_columns() {
+        return None;
+    }
+
+    // No tooltips. Iced has them, but they need an overlay layer that
+    // fights the scrollable these sit inside, and both glyphs are
+    // conventional enough to stand alone.
+    let small = |glyph: &'static str, message: Message| {
+        button(text(glyph).size(ty::BODY_SMALL).center())
+            .style(style::quiet_button(palette))
+            .padding([4, 8])
+            .width(Length::Fixed(30.0))
+            .on_press(message)
+    };
+
+    Some(
+        row![
+            small("\u{2197}", Message::Reveal(entry.path.clone())),
+            small("\u{29c9}", Message::CopyPath(entry.path.clone())),
+        ]
+        .spacing(4)
+        .into(),
+    )
+}
+
 /// A checkbox for a file, or the space one would take.
 ///
 /// Directories get the space, not a tick: removing a whole tree is a far
@@ -501,15 +540,19 @@ fn largest<'a>(
             .size(ty::BODY_SMALL)
             .style(style::body(palette));
 
-        rows = rows.push(
-            // Fill, because `row!` is Shrink by default and a Shrink row
-            // resolves its Fill child to the child's natural width — so the
-            // name never wraps and draws straight over the size.
-            row![tick(palette, storage, entry), name, size]
-                .spacing(ty::GAP_TIGHT)
-                .align_y(Alignment::Center)
-                .width(Length::Fill),
-        );
+        // Fill, because `row!` is Shrink by default and a Shrink row
+        // resolves its Fill child to the child's natural width — so the
+        // name never wraps and draws straight over the size.
+        let mut line = row![tick(palette, storage, entry), name, size]
+            .spacing(ty::GAP_TIGHT)
+            .align_y(Alignment::Center)
+            .width(Length::Fill);
+
+        if let Some(actions) = file_actions(palette, metrics, entry) {
+            line = line.push(actions);
+        }
+
+        rows = rows.push(line);
     }
 
     container(
