@@ -96,6 +96,14 @@ pub struct Target {
     /// path crosses that boundary. See [`crate::privileged`].
     #[serde(skip_serializing_if = "Option::is_none")]
     pub privileged: Option<crate::privileged::Operation>,
+    /// A directory that must have no open file descriptors at the moment
+    /// this is acted on.
+    ///
+    /// `blocked` records what was true when the scan ran; this records what
+    /// has to be true when the removal happens. They are different
+    /// questions, and a browser opened in between answers them differently.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requires_idle: Option<PathBuf>,
     /// Why this cannot be acted on right now, if it cannot.
     ///
     /// Distinct from risk. A risky target is one the user may choose; a
@@ -117,6 +125,7 @@ impl Target {
             risk,
             requires_root: false,
             privileged: None,
+            requires_idle: None,
             blocked: None,
         }
     }
@@ -147,6 +156,13 @@ impl Target {
     pub fn by_operation(mut self, operation: crate::privileged::Operation) -> Self {
         self.requires_root = true;
         self.privileged = Some(operation);
+        self
+    }
+
+    /// Record a directory that must be idle when this is acted on.
+    #[must_use]
+    pub fn requires_idle(mut self, directory: impl Into<PathBuf>) -> Self {
+        self.requires_idle = Some(directory.into());
         self
     }
 
@@ -303,6 +319,20 @@ mod tests {
 
         assert_eq!(scan.size().on_disk, 1500);
         assert_eq!(scan.reclaimable_unprivileged().on_disk, 300);
+    }
+
+    #[test]
+    fn a_target_can_name_a_directory_that_must_be_idle() {
+        let target = Target::new("Brave — web cache", Kind::Cache, Risk::Safe)
+            .requires_idle("/home/x/.config/BraveSoftware");
+
+        assert_eq!(
+            target.requires_idle.as_deref(),
+            Some(std::path::Path::new("/home/x/.config/BraveSoftware")),
+        );
+        // Not the same thing as being blocked: this one is actionable now,
+        // and the condition is checked again later.
+        assert!(target.is_actionable());
     }
 
     #[test]

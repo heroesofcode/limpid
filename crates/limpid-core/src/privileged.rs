@@ -187,6 +187,7 @@ pub const HELPER_OVERRIDE: &str = "LIMPID_HELPER";
 pub struct Runner {
     helper: std::path::PathBuf,
     elevate: bool,
+    sandboxed: bool,
 }
 
 /// Why a privileged run did not happen.
@@ -201,6 +202,12 @@ pub enum RunError {
     /// The user dismissed the authentication dialogue.
     #[error("authorisation was declined")]
     Declined,
+    /// The engine is pointed at a fixture, and these operations cannot be.
+    #[error(
+        "the engine is pointed at a fixture, and privileged operations cannot be: \
+         paccache and journalctl act on the real system whatever --root says"
+    )]
+    Sandboxed,
     /// The helper ran but said something unintelligible.
     #[error("the helper's reply could not be read: {0}")]
     Unreadable(String),
@@ -212,6 +219,22 @@ impl Runner {
         Self {
             helper: Self::locate(),
             elevate: true,
+            sandboxed: false,
+        }
+    }
+
+    /// A runner for a given set of roots.
+    ///
+    /// When the roots point at a fixture, this refuses instead of running.
+    /// `--root` sandboxes the walker, but it cannot sandbox `paccache` or
+    /// `journalctl` — those act on the real system whatever it is set to.
+    /// Silently doing that to someone who believed they were testing is the
+    /// worst outcome available, so the request is refused rather than
+    /// quietly redirected.
+    pub fn for_roots(roots: &crate::paths::Roots) -> Self {
+        Self {
+            sandboxed: roots.is_sandboxed(),
+            ..Self::new()
         }
     }
 
@@ -221,6 +244,7 @@ impl Runner {
         Self {
             helper: helper.into(),
             elevate: false,
+            sandboxed: false,
         }
     }
 
@@ -247,6 +271,10 @@ impl Runner {
         use std::process::{Command, Stdio};
 
         request.validate()?;
+
+        if self.sandboxed {
+            return Err(RunError::Sandboxed);
+        }
 
         let mut command = if self.elevate {
             let mut command = Command::new("pkexec");
@@ -397,6 +425,34 @@ mod tests {
         assert!(matches!(
             runner.run(&request).unwrap_err(),
             RunError::Invalid(_)
+        ));
+    }
+
+    #[test]
+    fn a_fixture_refuses_privileged_operations_instead_of_touching_the_real_system() {
+        let fixture = tempfile::tempdir().unwrap();
+        let runner = Runner::for_roots(&crate::paths::Roots::under(fixture.path()));
+        let request = Request {
+            operations: vec![Operation::RemoveCoredumps],
+        };
+
+        assert!(matches!(
+            runner.run(&request).unwrap_err(),
+            RunError::Sandboxed
+        ));
+    }
+
+    #[test]
+    fn real_roots_do_not_refuse() {
+        // Not a fixture, so nothing here objects; it fails later, on the
+        // helper, which is a different error.
+        let runner = Runner::for_roots(&crate::paths::Roots::real());
+
+        assert!(!matches!(
+            runner.run(&Request {
+                operations: vec![Operation::RemoveCoredumps]
+            }),
+            Err(RunError::Sandboxed),
         ));
     }
 

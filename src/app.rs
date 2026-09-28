@@ -96,6 +96,14 @@ pub struct Storage {
     pub survey: Option<Survey>,
     /// Whether a walk is under way.
     pub working: bool,
+    /// Which walk the result on screen belongs to.
+    ///
+    /// Walks take seconds and finish out of order, so a slow one started
+    /// earlier can land after a fast one started later. Without this the
+    /// older result wins and the screen shows one directory's contents under
+    /// another's name — which is merely wrong today, and deletes the wrong
+    /// file as soon as a row can be ticked.
+    pub generation: u64,
 }
 
 impl Storage {
@@ -152,8 +160,8 @@ pub enum Message {
     Cleaned(Box<Cleaned>),
     /// Look at a directory on the storage page.
     Explore(PathBuf),
-    /// A directory finished being measured.
-    Explored(Box<Survey>),
+    /// A directory finished being measured, for the walk of this generation.
+    Explored(u64, Box<Survey>),
     /// A tile on the treemap was clicked.
     Descend(usize),
     /// A breadcrumb was clicked; go back to that depth.
@@ -297,6 +305,8 @@ impl State {
                 }
                 self.storage.working = true;
                 self.storage.survey = None;
+                self.storage.generation += 1;
+                let generation = self.storage.generation;
                 Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
@@ -306,10 +316,16 @@ impl State {
                         .await
                         .unwrap_or_default()
                     },
-                    |survey| Message::Explored(Box::new(survey)),
+                    move |survey| Message::Explored(generation, Box::new(survey)),
                 )
             }
-            Message::Explored(survey) => {
+            Message::Explored(generation, survey) => {
+                // A result from a walk that has been superseded is dropped.
+                // It describes a directory nobody is looking at any more,
+                // and every index in it would point at the wrong row.
+                if generation != self.storage.generation {
+                    return Task::none();
+                }
                 self.storage.working = false;
                 self.storage.survey = Some(*survey);
                 Task::none()
@@ -805,7 +821,10 @@ mod tests {
 
         // Simulate the walk that the task would have started.
         let _ = state.update(Message::Explore(PathBuf::from("/tmp")));
-        let _ = state.update(Message::Explored(Box::default()));
+        let _ = state.update(Message::Explored(
+            state.storage().generation,
+            Box::default(),
+        ));
         assert_eq!(state.storage().trail.len(), 1);
 
         // Coming back later does not measure again.
@@ -821,24 +840,65 @@ mod tests {
 
         let (mut state, _) = State::boot();
         let _ = state.update(Message::Explore(PathBuf::from("/tmp")));
-        let _ = state.update(Message::Explored(Box::new(Survey {
-            breakdown: Breakdown {
-                children: vec![Entry {
-                    path: "/tmp/film.mkv".into(),
-                    name: "film.mkv".into(),
-                    size: Size::new(10, 10),
-                    files: 1,
-                    is_dir: false,
-                }],
-                ..Breakdown::default()
-            },
-            largest: Vec::new(),
-        })));
+        let generation = state.storage().generation;
+        let _ = state.update(Message::Explored(
+            generation,
+            Box::new(Survey {
+                breakdown: Breakdown {
+                    children: vec![Entry {
+                        path: "/tmp/film.mkv".into(),
+                        name: "film.mkv".into(),
+                        size: Size::new(10, 10),
+                        files: 1,
+                        is_dir: false,
+                    }],
+                    ..Breakdown::default()
+                },
+                largest: Vec::new(),
+            }),
+        ));
 
         let _ = state.update(Message::Descend(0));
         let _ = state.update(Message::Descend(99));
 
         assert_eq!(state.storage().trail, vec![PathBuf::from("/tmp")]);
+    }
+
+    #[test]
+    fn a_result_from_a_superseded_walk_is_dropped() {
+        use limpid_core::analyse::{Breakdown, Entry, Survey};
+        use limpid_core::size::Size;
+
+        let named = |name: &str| Survey {
+            breakdown: Breakdown {
+                children: vec![Entry {
+                    path: format!("/a/{name}").into(),
+                    name: name.to_owned(),
+                    size: Size::new(10, 10),
+                    files: 1,
+                    is_dir: true,
+                }],
+                ..Breakdown::default()
+            },
+            largest: Vec::new(),
+        };
+
+        let (mut state, _) = State::boot();
+        let _ = state.update(Message::Explore(PathBuf::from("/a")));
+        let slow = state.storage().generation;
+        let _ = state.update(Message::Explore(PathBuf::from("/a/b")));
+        let quick = state.storage().generation;
+
+        // The second walk finishes first, as a smaller directory would.
+        let _ = state.update(Message::Explored(quick, Box::new(named("from-b"))));
+        // Then the first one lands, describing a directory nobody is on.
+        let _ = state.update(Message::Explored(slow, Box::new(named("from-a"))));
+
+        let showing = &state.storage().survey.as_ref().unwrap().breakdown.children[0].name;
+        assert_eq!(
+            showing, "from-b",
+            "the superseded walk overwrote the current one"
+        );
     }
 
     #[test]

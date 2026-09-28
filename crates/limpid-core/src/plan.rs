@@ -63,6 +63,8 @@ pub struct Item {
     pub paths: Vec<PathBuf>,
     /// How it goes.
     pub disposal: Disposal,
+    /// A directory that must have nothing open inside it when this runs.
+    pub requires_idle: Option<PathBuf>,
     /// What the scan measured, for comparison against what actually happened.
     pub expected: Size,
 }
@@ -112,6 +114,7 @@ impl Plan {
                     name: target.name.clone(),
                     paths: target.paths.clone(),
                     disposal: Disposal::for_kind(target.kind),
+                    requires_idle: target.requires_idle.clone(),
                     expected: target.size,
                 }),
                 // Needs elevation but nothing knows how to do it. Dropped
@@ -220,6 +223,19 @@ mod tests {
 
         assert_eq!(plan.items.len(), 1);
         assert_eq!(plan.items[0].name, "cache");
+    }
+
+    #[test]
+    fn the_idle_requirement_is_carried_into_the_plan() {
+        let target = target("Brave — web cache", Kind::Cache, Risk::Safe)
+            .requires_idle("/home/x/.config/BraveSoftware");
+
+        let plan = Plan::from_targets(std::slice::from_ref(&target));
+
+        assert_eq!(
+            plan.items[0].requires_idle.as_deref(),
+            Some(std::path::Path::new("/home/x/.config/BraveSoftware")),
+        );
     }
 
     #[test]
