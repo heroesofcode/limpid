@@ -1,9 +1,12 @@
 //! Where the space went.
 
-use iced::widget::{Space, button, column, container, row, text};
+use iced::widget::text::Wrapping;
+use iced::widget::{Space, button, checkbox, column, container, row, text};
 use iced::{Alignment, Element, Length};
 
 use limpid_core::analyse::{Breakdown, Entry};
+use limpid_core::execute::Outcome;
+use limpid_core::plan::Disposal;
 use limpid_core::size::human;
 use limpid_theme::Palette;
 
@@ -11,10 +14,15 @@ use crate::app::{Message, Storage, placeholder};
 use crate::layout::Metrics;
 use crate::style;
 use crate::typography as ty;
+use crate::view::{action, tick_spacer};
 use crate::widget::treemap::Treemap;
 
 /// Draw the storage page.
 pub fn view<'a>(palette: Palette, metrics: Metrics, storage: &'a Storage) -> Element<'a, Message> {
+    if storage.removing {
+        return placeholder(palette, "Removing\u{2026}");
+    }
+
     if storage.working {
         let where_ = storage
             .current()
@@ -47,11 +55,21 @@ pub fn view<'a>(palette: Palette, metrics: Metrics, storage: &'a Storage) -> Ele
             .into();
     }
 
+    if let Some(outcome) = &storage.outcome {
+        body = body.push(result(palette, metrics, outcome));
+    }
+
+    if storage.confirming_delete {
+        body = body.push(confirmation(palette, metrics, storage));
+    } else if !storage.selected.is_empty() {
+        body = body.push(action_bar(palette, metrics, storage));
+    }
+
     body = body.push(map(palette, metrics, &survey.breakdown));
-    body = body.push(children(palette, metrics, &survey.breakdown));
+    body = body.push(children(palette, metrics, storage, &survey.breakdown));
 
     if !survey.largest.is_empty() {
-        body = body.push(largest(palette, metrics, &survey.largest));
+        body = body.push(largest(palette, metrics, storage, &survey.largest));
     }
 
     if survey.breakdown.unreadable > 0 {
@@ -167,8 +185,212 @@ fn map<'a>(palette: Palette, metrics: Metrics, breakdown: &Breakdown) -> Element
     .into()
 }
 
+/// The strip that appears once something is ticked.
+///
+/// Only when there is a selection: an empty action bar on every visit is a
+/// permanent reminder of a thing you are not doing.
+fn action_bar<'a>(palette: Palette, metrics: Metrics, storage: &Storage) -> Element<'a, Message> {
+    let plan = storage.plan(Disposal::Trash);
+    let summary = format!(
+        "{} selected, {}",
+        plan.items.len(),
+        human(plan.expected().on_disk)
+    );
+
+    let clear = action("Clear", false)
+        .style(style::quiet_button(palette))
+        .padding([8, 14])
+        .on_press(Message::ClearSelection);
+    let delete = action("Delete", false)
+        .style(style::quiet_button(palette))
+        .padding([8, 14])
+        .on_press(Message::AskToDelete);
+
+    // Trash is the primary action because it is the reversible one, and it
+    // acts directly for the same reason. A confirmation whose consequence is
+    // "you can undo this from your file manager" only teaches people to
+    // dismiss confirmations.
+    let stacked = !metrics.buttons_inline();
+    let trash = action("Move to trash", stacked)
+        .style(style::primary_button(palette))
+        .padding([10, 20])
+        .on_press(Message::TrashSelected);
+
+    let label = text(summary).size(ty::BODY).style(style::body(palette));
+    let secondary = row![clear, delete]
+        .spacing(ty::GAP_TIGHT)
+        .align_y(Alignment::Center);
+
+    let inner: Element<'a, Message> = if metrics.two_columns() {
+        row![
+            label.width(Length::Fill),
+            secondary,
+            Space::new().width(Length::Fixed(ty::GAP_TIGHT)),
+            trash,
+        ]
+        .spacing(ty::GAP_TIGHT)
+        .align_y(Alignment::Center)
+        .into()
+    } else if metrics.buttons_inline() {
+        column![
+            label,
+            row![secondary, Space::new().width(Length::Fill), trash]
+                .spacing(ty::GAP_TIGHT)
+                .align_y(Alignment::Center),
+        ]
+        .spacing(ty::GAP_TIGHT)
+        .into()
+    } else {
+        column![label, secondary, trash]
+            .spacing(ty::GAP_TIGHT)
+            .width(Length::Fill)
+            .into()
+    };
+
+    container(inner)
+        .style(style::card(palette))
+        .padding(metrics.gap)
+        .width(Length::Fill)
+        .into()
+}
+
+/// The confirmation for removing outright rather than trashing.
+fn confirmation<'a>(palette: Palette, metrics: Metrics, storage: &Storage) -> Element<'a, Message> {
+    let plan = storage.plan(Disposal::Delete);
+
+    let mut lines = column![].spacing(4).width(Length::Fill);
+    for item in &plan.items {
+        lines = lines.push(
+            row![
+                text(item.name.clone())
+                    .size(ty::BODY_SMALL)
+                    .style(style::body(palette))
+                    .wrapping(Wrapping::WordOrGlyph)
+                    .width(Length::Fill),
+                text(human(item.expected.on_disk))
+                    .size(ty::BODY_SMALL)
+                    .style(style::secondary(palette)),
+            ]
+            .width(Length::Fill),
+        );
+    }
+
+    let stacked = !metrics.buttons_inline();
+    let cancel = action("Cancel", stacked)
+        .style(style::quiet_button(palette))
+        .padding([10, 18])
+        .on_press(Message::CancelDelete);
+    let remove = action("Delete permanently", stacked)
+        .style(style::danger_button(palette))
+        .padding([10, 20])
+        .on_press(Message::DeleteSelected);
+
+    let actions: Element<'a, Message> = if stacked {
+        column![cancel, remove]
+            .spacing(ty::GAP_TIGHT)
+            .width(Length::Fill)
+            .into()
+    } else {
+        row![Space::new().width(Length::Fill), cancel, remove]
+            .spacing(ty::GAP_TIGHT)
+            .into()
+    };
+
+    container(
+        column![
+            text(format!(
+                "Delete {} permanently?",
+                human(plan.expected().on_disk)
+            ))
+            .size(ty::TITLE)
+            .style(style::heading(palette))
+            .width(Length::Fill),
+            text(
+                "These do not go to the trash and cannot be recovered. Moving them to \
+                 the trash instead frees the same space once you empty it.",
+            )
+            .size(ty::BODY_SMALL)
+            .style(style::secondary(palette))
+            .width(Length::Fill),
+            Space::new().height(Length::Fixed(ty::GAP_TIGHT)),
+            lines,
+            Space::new().height(Length::Fixed(ty::GAP)),
+            actions,
+        ]
+        .spacing(4)
+        .width(Length::Fill),
+    )
+    .style(style::card(palette))
+    .padding(metrics.card)
+    .width(Length::Fill)
+    .into()
+}
+
+/// What the last removal from this page did.
+fn result<'a>(palette: Palette, metrics: Metrics, outcome: &Outcome) -> Element<'a, Message> {
+    let line = |good: bool, said: String| {
+        row![
+            text(if good { "\u{2713}" } else { "\u{2717}" })
+                .size(ty::BODY_SMALL)
+                .style(style::tinted(if good {
+                    palette.green
+                } else {
+                    palette.red
+                })),
+            text(said)
+                .size(ty::BODY_SMALL)
+                .style(style::body(palette))
+                .width(Length::Fill),
+        ]
+        .spacing(ty::GAP_TIGHT)
+    };
+
+    let mut body = column![line(
+        true,
+        format!(
+            "Removed {} across {} files.",
+            human(outcome.reclaimed.on_disk),
+            outcome.files
+        ),
+    )]
+    .spacing(6)
+    .width(Length::Fill);
+
+    for problem in &outcome.problems {
+        body = body.push(line(false, problem.to_string()));
+    }
+
+    container(body)
+        .style(style::well(palette))
+        .padding(metrics.gap)
+        .width(Length::Fill)
+        .into()
+}
+
+/// A checkbox for a file, or the space one would take.
+///
+/// Directories get the space, not a tick: removing a whole tree is a far
+/// larger blast radius and waits for an undo.
+fn tick<'a>(palette: Palette, storage: &Storage, entry: &Entry) -> Element<'a, Message> {
+    if entry.is_dir {
+        return tick_spacer();
+    }
+
+    let path = entry.path.clone();
+    checkbox(storage.is_selected(&path))
+        .size(16)
+        .style(style::tick(palette))
+        .on_toggle(move |_| Message::ToggleFile(path.clone()))
+        .into()
+}
+
 /// The same level as a list, which the treemap cannot show for small items.
-fn children<'a>(palette: Palette, metrics: Metrics, breakdown: &Breakdown) -> Element<'a, Message> {
+fn children<'a>(
+    palette: Palette,
+    metrics: Metrics,
+    storage: &Storage,
+    breakdown: &Breakdown,
+) -> Element<'a, Message> {
     let total = breakdown.total().on_disk;
     let mut rows = column![].spacing(2).width(Length::Fill);
 
@@ -188,6 +410,7 @@ fn children<'a>(palette: Palette, metrics: Metrics, breakdown: &Breakdown) -> El
                 text(name)
                     .size(ty::BODY_SMALL)
                     .style(style::body(palette))
+                    .wrapping(Wrapping::WordOrGlyph)
                     .width(Length::Fill),
                 share.width(Length::Fixed(44.0)).align_x(Alignment::End),
                 size.width(Length::Fixed(76.0)).align_x(Alignment::End),
@@ -200,6 +423,7 @@ fn children<'a>(palette: Palette, metrics: Metrics, breakdown: &Breakdown) -> El
                 text(name)
                     .size(ty::BODY_SMALL)
                     .style(style::body(palette))
+                    .wrapping(Wrapping::WordOrGlyph)
                     .width(Length::Fill),
                 size,
             ]
@@ -208,7 +432,9 @@ fn children<'a>(palette: Palette, metrics: Metrics, breakdown: &Breakdown) -> El
             .into()
         };
 
-        let entry: Element<'a, Message> = if child.is_dir {
+        // The tick sits outside the button: inside it, the button would
+        // swallow the click and descend instead of selecting.
+        let body: Element<'a, Message> = if child.is_dir {
             button(line)
                 .style(style::nav_button(palette, false))
                 .padding([7, 10])
@@ -219,7 +445,12 @@ fn children<'a>(palette: Palette, metrics: Metrics, breakdown: &Breakdown) -> El
             container(line).padding([7, 10]).width(Length::Fill).into()
         };
 
-        rows = rows.push(entry);
+        rows = rows.push(
+            row![tick(palette, storage, child), body]
+                .spacing(ty::GAP_TIGHT)
+                .align_y(Alignment::Center)
+                .width(Length::Fill),
+        );
     }
 
     container(rows)
@@ -230,7 +461,12 @@ fn children<'a>(palette: Palette, metrics: Metrics, breakdown: &Breakdown) -> El
 }
 
 /// The largest individual files anywhere below here.
-fn largest<'a>(palette: Palette, metrics: Metrics, entries: &[Entry]) -> Element<'a, Message> {
+fn largest<'a>(
+    palette: Palette,
+    metrics: Metrics,
+    storage: &Storage,
+    entries: &[Entry],
+) -> Element<'a, Message> {
     let mut rows = column![].spacing(6).width(Length::Fill);
 
     for entry in entries {
@@ -242,13 +478,20 @@ fn largest<'a>(palette: Palette, metrics: Metrics, entries: &[Entry]) -> Element
             .map(|parent| parent.display().to_string())
             .unwrap_or_default();
 
+        // A file name is one long token as often as not, and the default
+        // word-level wrap cannot break it — so it runs past its column and
+        // draws straight over the size beside it. Only visible in a narrow
+        // window, which is exactly where it matters.
         let name = column![
             text(entry.name.clone())
                 .size(ty::BODY_SMALL)
-                .style(style::body(palette)),
+                .style(style::body(palette))
+                .wrapping(Wrapping::WordOrGlyph)
+                .width(Length::Fill),
             text(where_)
                 .size(ty::CAPTION)
                 .style(style::secondary(palette))
+                .wrapping(Wrapping::WordOrGlyph)
                 .width(Length::Fill),
         ]
         .spacing(2)
@@ -259,13 +502,15 @@ fn largest<'a>(palette: Palette, metrics: Metrics, entries: &[Entry]) -> Element
             .style(style::body(palette));
 
         rows = rows.push(
-            row![name, size]
+            // Fill, because `row!` is Shrink by default and a Shrink row
+            // resolves its Fill child to the child's natural width — so the
+            // name never wraps and draws straight over the size.
+            row![tick(palette, storage, entry), name, size]
                 .spacing(ty::GAP_TIGHT)
-                .align_y(Alignment::Center),
+                .align_y(Alignment::Center)
+                .width(Length::Fill),
         );
     }
-
-    let _ = metrics;
 
     container(
         column![
