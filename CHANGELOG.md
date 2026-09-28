@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.0](https://github.com/heroesofcode/limpid/compare/v0.2.1...v0.3.0) (2026-09-28)
+
+
+### Features
+
+* act on files from the storage view ([04dfad5](https://github.com/heroesofcode/limpid/commit/04dfad527af7e85de12f923cb0100237573aba53))
+* give the guard a second permission, for what the user points at ([#19](https://github.com/heroesofcode/limpid/issues/19)) ([9ea9b20](https://github.com/heroesofcode/limpid/commit/9ea9b202f3e55a781b71c4dbe41eaf76df866f63))
+* lay the interface out for the room it actually has ([#14](https://github.com/heroesofcode/limpid/issues/14)) ([c4fe746](https://github.com/heroesofcode/limpid/commit/c4fe7468953b9e4299b7314a0299a0865d539bc2))
+* reveal a file in the file manager, and copy its path ([#21](https://github.com/heroesofcode/limpid/issues/21)) ([b5c776f](https://github.com/heroesofcode/limpid/commit/b5c776f775166afcbed97513b59c0c124f4d60b5))
+
+
+### Bug fixes
+
+* close the four holes that acting from the storage view would widen ([9b972cc](https://github.com/heroesofcode/limpid/commit/9b972ccd39de2c9f0c6754314e359998ae33faf7))
+
 ## [0.2.1](https://github.com/heroesofcode/limpid/compare/v0.2.0...v0.2.1) (2026-09-26)
 
 

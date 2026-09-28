@@ -1912,7 +1912,7 @@ dependencies = [
 
 [[package]]
 name = "limpid"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "iced",
@@ -1926,7 +1926,7 @@ dependencies = [
 
 [[package]]
 name = "limpid-cli"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1939,7 +1939,7 @@ dependencies = [
 
 [[package]]
 name = "limpid-core"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "dirs",
@@ -1956,7 +1956,7 @@ dependencies = [
 
 [[package]]
 name = "limpid-helper"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "limpid-core",
@@ -1966,7 +1966,7 @@ dependencies = [
 
 [[package]]
 name = "limpid-theme"
-version = "0.2.1"
+version = "0.3.0"
 dependencies = [
  "anyhow",
  "dirs",
