@@ -66,9 +66,10 @@ Point the whole engine at a fixture instead of the real filesystem with
 cargo run -p limpid-cli -- scan --root /tmp/fixture
 ```
 
-Note the gap documented in @.claude/roadmap.md: `--root` does **not** yet
-sandbox the privileged helper. Never run `clean --apply --include-root`
-against a fixture expecting it to be inert.
+`--root` also disarms the privileged helper: `Runner::for_roots` refuses
+instead of running, because `paccache` and `journalctl` act on the real
+system whatever `--root` is set to. Redirecting them is impossible, so the
+request is refused rather than quietly aimed at the wrong machine.
 
 ## Conventions
 

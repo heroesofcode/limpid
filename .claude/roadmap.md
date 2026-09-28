@@ -50,11 +50,13 @@ Missing today, and present in every competitor:
   screen. Settle this before drawing any button.
 - Files only. Selecting a *directory* in the treemap is a much larger blast
   radius and waits for history and undo in 0.4.
-- Fix: `--root` does not sandbox the privileged helper
-- Fix: the browser-running check is never re-checked at removal time
-- Fix: `Guard::check` only tests the leaf of a path for being a symlink
-- Fix: stale-result race on the storage page — harmless today, destructive
-  once this release lands
+
+The four safety fixes this release depended on are done — the guard checks
+every path component for symlinks rather than only the leaf, the
+browser-in-use test is re-run by the executor at the moment of removal,
+`--root` refuses privileged operations instead of aiming them at the real
+system, and storage walks carry a generation so a superseded result cannot
+overwrite the current one and leave a tick pointing at the wrong file.
 
 ## 0.4 — Trust and memory
 

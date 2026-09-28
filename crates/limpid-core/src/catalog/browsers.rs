@@ -40,6 +40,12 @@ pub fn scan(context: &Context) -> Category {
         }
 
         for target in found {
+            // Two different questions. `blocked` is what was true when the
+            // scan ran; `requires_idle` is what has to be true when the
+            // removal happens, and the executor checks it again then. A
+            // browser opened in the seconds between the two answers them
+            // differently.
+            let target = target.requires_idle(&installation.config);
             category.targets.push(match &blocked {
                 Some(reason) => target.blocked(reason.clone()),
                 None => target,

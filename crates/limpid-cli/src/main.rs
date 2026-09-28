@@ -152,7 +152,7 @@ fn main() -> Result<()> {
             // process, and only made when the user asked for it and meant
             // it: a dry run never raises an authentication prompt.
             let elevated = if apply && plan.needs_elevation() {
-                Some(Runner::new().run(&Request {
+                Some(Runner::for_roots(&context.roots).run(&Request {
                     operations: plan.operations.clone(),
                 }))
             } else {
@@ -412,6 +412,7 @@ fn report_clean(
 
     for problem in &outcome.problems {
         let label = match problem {
+            Problem::InUse { .. } => "in use",
             Problem::Refused(_) => "refused",
             Problem::Failed { .. } => "failed",
         };

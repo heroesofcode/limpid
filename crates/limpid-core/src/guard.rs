@@ -164,14 +164,23 @@ impl Guard {
             return Err(Refusal::OutOfBounds(path.to_owned()));
         }
 
-        // `symlink_metadata` does not follow, so this sees the link itself.
+        // Every component, not just the leaf. The boundary check above is
+        // lexical, so if any directory along the way is a symlink the path
+        // can start with a boundary and still resolve somewhere else
+        // entirely — and `remove_dir_all` would follow it. Checking only the
+        // last component looks right and defends nothing.
+        //
         // A missing path is fine: there is simply nothing to remove.
-        match std::fs::symlink_metadata(path) {
-            Ok(metadata) if metadata.file_type().is_symlink() => {
-                Err(Refusal::Symlink(path.to_owned()))
+        for component in path.ancestors() {
+            match std::fs::symlink_metadata(component) {
+                Ok(metadata) if metadata.file_type().is_symlink() => {
+                    return Err(Refusal::Symlink(component.to_owned()));
+                }
+                _ => continue,
             }
-            _ => Ok(()),
         }
+
+        Ok(())
     }
 
     /// Whether a path would be accepted.
@@ -310,6 +319,34 @@ mod tests {
         std::os::unix::fs::symlink(roots.home("Documents"), &link).unwrap();
 
         assert_eq!(guard.check(&link).unwrap_err(), Refusal::Symlink(link));
+    }
+
+    #[test]
+    fn a_symlink_anywhere_along_the_path_is_refused_not_just_the_last_part() {
+        let (_fixture, roots, guard) = fixture();
+        std::fs::create_dir_all(roots.home("elsewhere/yay")).unwrap();
+        std::fs::create_dir_all(&roots.home).unwrap();
+
+        // The cache root itself is a link. Lexically `~/.cache/yay` is
+        // inside the boundary; in reality it is somewhere else, and only
+        // checking the leaf would let it through.
+        std::os::unix::fs::symlink(roots.home("elsewhere"), &roots.cache).unwrap();
+
+        let refusal = guard.check(&roots.cache("yay")).unwrap_err();
+
+        assert_eq!(refusal, Refusal::Symlink(roots.cache.clone()));
+    }
+
+    #[test]
+    fn a_symlink_in_the_middle_of_a_path_is_refused() {
+        let (_fixture, roots, guard) = fixture();
+        std::fs::create_dir_all(roots.home("Documents/secrets")).unwrap();
+        std::fs::create_dir_all(&roots.cache).unwrap();
+        std::os::unix::fs::symlink(roots.home("Documents"), roots.cache("sneaky")).unwrap();
+
+        let refusal = guard.check(&roots.cache("sneaky/secrets")).unwrap_err();
+
+        assert_eq!(refusal, Refusal::Symlink(roots.cache("sneaky")));
     }
 
     #[test]

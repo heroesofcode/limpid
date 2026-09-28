@@ -20,6 +20,13 @@ use crate::walk::{self, WalkOptions};
 /// Something that could not be done.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Problem {
+    /// Something had a file open inside a directory that had to be idle.
+    InUse {
+        /// What the item was called.
+        item: String,
+        /// The process holding it.
+        holder: String,
+    },
     /// The guard would not allow it.
     Refused(Refusal),
     /// The filesystem would not allow it.
@@ -34,6 +41,10 @@ pub enum Problem {
 impl std::fmt::Display for Problem {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::InUse { item, holder } => write!(
+                formatter,
+                "{item}: {holder} still has files open there. Close it and scan again.",
+            ),
             Self::Refused(refusal) => write!(formatter, "{refusal}"),
             Self::Failed { path, reason } => write!(formatter, "{}: {reason}", path.display()),
         }
@@ -118,6 +129,21 @@ impl Executor {
     /// Carry out one item.
     fn run_item(&self, item: &Item) -> Outcome {
         let mut outcome = Outcome::default();
+
+        // Checked here rather than trusting what the scan found. A browser
+        // closed when the list was drawn may be open by the time someone
+        // reads it and presses the button, and removing a live profile does
+        // not free the space — it can make the browser discard the whole
+        // database rather than the part that was asked for.
+        if let Some(directory) = &item.requires_idle {
+            if let Some(holder) = crate::browser::holder_of(directory) {
+                outcome.problems.push(Problem::InUse {
+                    item: item.name.clone(),
+                    holder: format!("{} ({})", holder.name, holder.pid),
+                });
+                return outcome;
+            }
+        }
 
         for path in &item.paths {
             // Checked here, against the filesystem as it is now, rather than
@@ -367,6 +393,51 @@ mod tests {
         assert!(outcome.is_clean());
         assert_eq!(outcome.reclaimed.apparent, 2600);
         assert!(!file.exists());
+    }
+
+    #[test]
+    fn an_item_whose_directory_is_in_use_is_refused_at_the_last_moment() {
+        // The scan said it was closed; by the time the button was pressed it
+        // was not. This is the check the scan-time one cannot make.
+        let (_fixture, roots, cache) = populated_cache();
+        let plan = Plan::from_targets(&[Target::new("Brave — web cache", Kind::Cache, Risk::Safe)
+            .path(&cache)
+            .requires_idle(&cache)]);
+
+        let _open = std::fs::File::open(cache.join("a.png")).unwrap();
+        let outcome = Executor::applying(&roots).run(&plan);
+
+        assert!(matches!(outcome.problems[0], Problem::InUse { .. }));
+        assert_eq!(outcome.reclaimed, Size::ZERO);
+        assert!(cache.join("a.png").exists());
+    }
+
+    #[test]
+    fn an_idle_directory_is_cleaned_normally() {
+        let (_fixture, roots, cache) = populated_cache();
+        let plan = Plan::from_targets(&[Target::new("Brave — web cache", Kind::Cache, Risk::Safe)
+            .path(&cache)
+            .requires_idle(&cache)]);
+
+        let outcome = Executor::applying(&roots).run(&plan);
+
+        assert!(outcome.is_clean());
+        assert_eq!(outcome.reclaimed.apparent, 7000);
+    }
+
+    #[test]
+    fn a_dry_run_still_refuses_an_item_that_is_in_use() {
+        // Otherwise the preview promises bytes the real run will not deliver.
+        let (_fixture, roots, cache) = populated_cache();
+        let plan = Plan::from_targets(&[Target::new("Brave", Kind::Cache, Risk::Safe)
+            .path(&cache)
+            .requires_idle(&cache)]);
+
+        let _open = std::fs::File::open(cache.join("a.png")).unwrap();
+        let outcome = Executor::dry_run(&roots).run(&plan);
+
+        assert!(matches!(outcome.problems[0], Problem::InUse { .. }));
+        assert_eq!(outcome.reclaimed, Size::ZERO);
     }
 
     #[test]
