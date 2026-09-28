@@ -5,6 +5,7 @@
 
 mod app;
 mod layout;
+mod reveal;
 mod style;
 mod typography;
 mod view;

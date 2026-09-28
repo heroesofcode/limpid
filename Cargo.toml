@@ -26,6 +26,7 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 tokio = { version = "1", features = ["rt", "time"] }
+zbus = "5.11"
 iced = { version = "0.14", features = ["canvas", "tokio", "svg", "advanced"] }
 
 [workspace]

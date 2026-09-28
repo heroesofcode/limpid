@@ -226,6 +226,12 @@ pub enum Message {
     DeleteSelected,
     /// A removal from the storage page finished.
     SelectionRemoved(Box<Outcome>),
+    /// Nothing happened worth reacting to.
+    Nothing,
+    /// Show a file in the desktop's file manager.
+    Reveal(PathBuf),
+    /// Put a file's path on the clipboard.
+    CopyPath(PathBuf),
 }
 
 impl State {
@@ -429,6 +435,22 @@ impl State {
             }
             Message::TrashSelected => self.remove_selection(Disposal::Trash),
             Message::DeleteSelected => self.remove_selection(Disposal::Delete),
+            Message::Reveal(path) => {
+                // Off the frame loop: talking to a file manager that has to
+                // be started cold is not instant, and the answer is not
+                // needed for anything.
+                Task::perform(
+                    async move {
+                        let _ = tokio::task::spawn_blocking(move || {
+                            crate::reveal::in_file_manager(&path);
+                        })
+                        .await;
+                    },
+                    |()| Message::Nothing,
+                )
+            }
+            Message::CopyPath(path) => iced::clipboard::write(path.display().to_string()),
+            Message::Nothing => Task::none(),
             Message::SelectionRemoved(outcome) => {
                 self.storage.outcome = Some(*outcome);
                 self.storage.selected.clear();
