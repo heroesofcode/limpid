@@ -35,6 +35,19 @@ const TWO_COLUMNS_NEED: f32 = 460.0;
 const FIGURES_NEED: f32 = 300.0;
 /// What a row of two secondary buttons and a primary one costs.
 const BUTTON_ROW_NEEDS: f32 = 300.0;
+/// An average glyph's width as a share of the type size, in the sans faces
+/// Omarchy ships and the usual fallbacks. On the generous side on purpose:
+/// guessing wide costs an early line break, guessing narrow costs a
+/// clipped button.
+const GLYPH: f32 = 0.6;
+
+/// Roughly how wide a line of text is at this size.
+///
+/// For deciding arrangements, not for drawing: it only has to be right
+/// about whether something fits, and erring wide keeps it right.
+pub fn text_width(label: &str, size: f32) -> f32 {
+    label.chars().count() as f32 * size * GLYPH
+}
 
 /// Everything the views need to know about the room they have.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -120,6 +133,16 @@ impl Metrics {
     /// cannot tell is there.
     pub fn buttons_inline(&self) -> bool {
         self.content >= BUTTON_ROW_NEEDS
+    }
+
+    /// Whether a row that costs this much fits across the content.
+    ///
+    /// For controls whose cost depends on what they say — a bar of buttons
+    /// that grows when a selection offers more to do. Deriving the
+    /// threshold from the labels means it cannot drift out of agreement
+    /// with them when one is reworded.
+    pub fn fits(&self, cost: f32) -> bool {
+        self.content >= cost
     }
 
     /// Whether the gauge and the figures beside it both fit.
@@ -238,6 +261,25 @@ mod tests {
         assert!(!at(240.0, 690.0).buttons_inline());
         assert!(at(576.0, 640.0).buttons_inline());
         assert!(at(1020.0, 660.0).buttons_inline());
+    }
+
+    #[test]
+    fn a_row_fits_only_where_there_is_room_for_all_of_it() {
+        let cost = 600.0;
+        assert!(!at(288.0, 700.0).fits(cost));
+        assert!(!at(576.0, 700.0).fits(cost));
+        assert!(at(1020.0, 660.0).fits(cost));
+        // And nothing fits in a degenerate window, rather than everything.
+        assert!(!at(0.0, 0.0).fits(2.0));
+    }
+
+    #[test]
+    fn a_longer_label_never_costs_less() {
+        let short = text_width("None", ty::BODY_SMALL);
+        let long = text_width("Show in folder", ty::BODY_SMALL);
+        assert!(long > short);
+        // A larger size costs more for the same words.
+        assert!(text_width("Clean", ty::BODY) > text_width("Clean", ty::BODY_SMALL));
     }
 
     #[test]

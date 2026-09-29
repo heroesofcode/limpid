@@ -92,8 +92,11 @@ limpid-cli exclude --remove ~/.cache/thumbnails
 
 ## Configuration
 
-`~/.config/limpid/config.toml`, created the first time something is saved.
-It is meant to be edited by hand as much as by Limpid:
+The Settings page changes the cleaning policy and lists what is excluded.
+Tick something on the Overview or in the storage view and choose **Exclude**
+to stop Limpid offering it; an undo appears beside it. All of it lives in
+`~/.config/limpid/config.toml`, created the first time something is saved,
+which is meant to be edited by hand as much as through Limpid:
 
 ```toml
 version = 1

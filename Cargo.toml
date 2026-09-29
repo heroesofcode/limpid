@@ -29,6 +29,9 @@ tokio = { version = "1", features = ["rt", "time"] }
 zbus = "5.11"
 iced = { version = "0.14", features = ["canvas", "tokio", "svg", "advanced"] }
 
+[dev-dependencies]
+tempfile = "3.24"
+
 [workspace]
 resolver = "3"
 members = [

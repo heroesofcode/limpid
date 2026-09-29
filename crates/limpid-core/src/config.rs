@@ -303,6 +303,16 @@ impl Store {
         self.writable
     }
 
+    /// A path the way the file writes it: `~/...` under home.
+    pub fn display(&self, path: &Path) -> String {
+        contract(path, &self.home)
+    }
+
+    /// Read a path the way the file accepts it. See [`expand`].
+    pub fn expand(&self, text: &str) -> Option<PathBuf> {
+        expand(text, &self.home)
+    }
+
     /// Write the settings back.
     ///
     /// Only the keys that changed since the file was read are written;

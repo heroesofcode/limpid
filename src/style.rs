@@ -7,7 +7,7 @@
 //! `Palette` is `Copy`, which makes that cheap enough to do per widget.
 
 use iced::border::Radius;
-use iced::widget::{button, checkbox, container, rule, scrollable, text};
+use iced::widget::{button, checkbox, container, rule, scrollable, text, text_input};
 use iced::{Background, Border, Color as IcedColor, Shadow, Theme, Vector};
 
 use limpid_theme::{Color, Mode, Palette};
@@ -183,7 +183,12 @@ pub fn quiet_button(palette: Palette) -> impl Fn(&Theme, button::Status) -> butt
         };
         button::Style {
             background: Some(Background::Color(background)),
-            text_color: to_iced(palette.foreground),
+            // Faded, or a button that does nothing looks exactly like one
+            // that is waiting to be pressed.
+            text_color: match status {
+                button::Status::Disabled => faded(palette.foreground, 0.4),
+                _ => to_iced(palette.foreground),
+            },
             border: Border {
                 color: border,
                 width: 1.0,
@@ -348,6 +353,32 @@ pub fn scroller(palette: Palette) -> impl Fn(&Theme, scrollable::Status) -> scro
             horizontal_rail: rail,
             gap: None,
             ..scrollable::default(&Theme::Dark, status)
+        }
+    }
+}
+
+/// A field to type into.
+///
+/// Sunken like a well, so it reads as a place to put something rather than
+/// as another card; the border takes the accent only while typing.
+pub fn field(palette: Palette) -> impl Fn(&Theme, text_input::Status) -> text_input::Style {
+    move |_, status| {
+        let border = match status {
+            text_input::Status::Focused { .. } => to_iced(palette.accent),
+            text_input::Status::Hovered => faded(palette.accent, 0.5),
+            _ => faded(palette.muted, 0.5),
+        };
+        text_input::Style {
+            background: Background::Color(to_iced(palette.dark_background)),
+            border: Border {
+                color: border,
+                width: 1.0,
+                radius: Radius::from(CONTROL_RADIUS),
+            },
+            icon: to_iced(palette.dark_foreground),
+            placeholder: faded(palette.foreground, 0.45),
+            value: to_iced(palette.foreground),
+            selection: faded(palette.accent, 0.35),
         }
     }
 }

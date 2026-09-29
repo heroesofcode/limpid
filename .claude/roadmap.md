@@ -37,7 +37,9 @@ Missing today, and present in every competitor:
 - Delete permanently, behind a second confirmation
 - Open containing folder, copy path — done: revealed through
   `org.freedesktop.FileManager1`, which selects the file, with `xdg-open` on
-  the parent as the fallback
+  the parent as the fallback. The per-row buttons only appear where there is
+  room, so both are also on the action bar whenever exactly one file is
+  ticked — reachable at any width.
 - Exclude a finding from future scans — **moved to 0.4**, to ship with the
   config file. An exclusion that is forgotten on the next launch is worse
   than having none.
@@ -67,14 +69,19 @@ cache; being wrong costs a re-download. From 0.5 it touches photographs and
 documents. The trust infrastructure has to exist before the first feature
 that can lose something irreplaceable.
 
-- A config file — **done** in the engine and the CLI:
+- A config file — **done**:
   `~/.config/limpid/config.toml`, versioned from the first release, edited
   with `toml_edit` so a save keeps the person's comments and touches only the
   keys that changed. Policy (`keep_package_versions`, `keep_journal_days`)
   flows into the operations the helper is asked for.
-- A managed exclusion list — **done** in the engine and the CLI, enforced by
-  the scanners *and* the executor. The interface — an exclude action in the
-  Overview and the storage view, and the list in Settings — is the next PR.
+  Settings shows both as steppers, and the problems with the file when it
+  has any.
+- A managed exclusion list — **done**, enforced by the scanners *and* the
+  executor. Exclude acts on the selection in the Overview and the storage
+  view, at once and with an undo beside it, since nothing is lost; Settings
+  lists the exclusions and takes a typed path. Excluded files stay listed
+  in the storage view, marked and without a tick. There is no folder picker
+  yet: a portal `FileChooser` would be the way, not a toolkit dialog.
 - History of every run: what was removed, how big, where it went, when
 - Undo for anything that went to the trash
 - Directory selection in the storage view, now that there is an undo
