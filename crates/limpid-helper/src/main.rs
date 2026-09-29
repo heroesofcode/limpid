@@ -19,6 +19,7 @@
 #![forbid(unsafe_code)]
 
 use std::io::{self, Read, Write};
+use std::path::Path;
 use std::process::Command;
 
 use limpid_core::privileged::{Completed, Operation, Report, Request};
@@ -114,24 +115,32 @@ fn trim_package_cache(keep: u8) -> Result<String, String> {
 /// Remove the files in the coredump directory.
 ///
 /// The one operation that touches files directly, and the path is a
-/// constant: nothing the caller sends can influence it. Only regular files
-/// directly inside are removed — no recursion, so a directory planted there
-/// leads nowhere.
+/// constant: nothing the caller sends can influence it.
 fn remove_coredumps() -> Result<String, String> {
-    let entries = match std::fs::read_dir(COREDUMP_DIRECTORY) {
+    remove_files_in(Path::new(COREDUMP_DIRECTORY))
+}
+
+/// Remove the regular files directly inside `directory`, and nothing else.
+///
+/// No recursion, so a directory planted there leads nowhere. And symlinks
+/// are **skipped** — neither followed nor removed. `DirEntry::metadata`
+/// does not traverse a link, so a link reports itself as a link, and
+/// `is_file` is false for it. Split out from [`remove_coredumps`] only so
+/// that this is tested rather than asserted: the project roadmap once
+/// claimed the opposite, from a reading of an older comment here.
+fn remove_files_in(directory: &Path) -> Result<String, String> {
+    let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
             return Ok("nothing stored".to_owned());
         }
-        Err(error) => return Err(format!("{COREDUMP_DIRECTORY}: {error}")),
+        Err(error) => return Err(format!("{}: {error}", directory.display())),
     };
 
     let mut removed = 0_u32;
     let mut failed = Vec::new();
 
     for entry in entries.flatten() {
-        // symlink_metadata, so a symlink is removed as a link rather than
-        // followed to whatever it names.
         let Ok(metadata) = entry.metadata() else {
             continue;
         };
@@ -180,6 +189,39 @@ fn run(program: &str, arguments: &[&str]) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_regular_files_directly_inside_are_removed() {
+        let directory = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(directory.path().join("core.a.zst"), b"x").unwrap();
+        std::fs::write(directory.path().join("core.b.zst"), b"x").unwrap();
+        std::fs::create_dir(directory.path().join("nested")).unwrap();
+        std::fs::write(directory.path().join("nested/core.c.zst"), b"x").unwrap();
+        std::fs::write(outside.path().join("precious"), b"x").unwrap();
+        std::os::unix::fs::symlink(
+            outside.path().join("precious"),
+            directory.path().join("core.link.zst"),
+        )
+        .unwrap();
+
+        let said = remove_files_in(directory.path()).unwrap();
+
+        assert_eq!(said, "removed 2 dumps");
+        // No recursion into a directory planted there.
+        assert!(directory.path().join("nested/core.c.zst").exists());
+        // The link is skipped: not removed, and not followed to its target.
+        assert!(directory.path().join("core.link.zst").exists());
+        assert!(outside.path().join("precious").exists());
+    }
+
+    #[test]
+    fn a_directory_that_does_not_exist_has_nothing_stored() {
+        assert_eq!(
+            remove_files_in(Path::new("/definitely/not/here")).unwrap(),
+            "nothing stored"
+        );
+    }
 
     #[test]
     fn a_command_that_does_not_exist_is_an_error_rather_than_a_panic() {
