@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use crate::config::Exclusions;
 use crate::size::Size;
 
 /// Directory names that are never descended into, wherever they appear.
@@ -31,6 +32,12 @@ pub struct WalkOptions {
     pub same_filesystem: bool,
     /// Worker threads. `None` lets the walker choose from the CPU count.
     pub threads: Option<usize>,
+    /// Subtrees not to descend into or count.
+    ///
+    /// So that a target with something excluded inside it reports what
+    /// would actually go, rather than a figure including bytes the executor
+    /// is going to leave alone.
+    pub skip: Exclusions,
 }
 
 impl Default for WalkOptions {
@@ -38,6 +45,7 @@ impl Default for WalkOptions {
         Self {
             same_filesystem: true,
             threads: None,
+            skip: Exclusions::default(),
         }
     }
 }
@@ -88,17 +96,29 @@ pub fn measure(root: &Path, options: &WalkOptions) -> io::Result<Usage> {
     // uncontended on the overwhelming majority of entries.
     let seen_inodes: Mutex<HashSet<(u64, u64)>> = Mutex::new(HashSet::new());
 
+    // Only the exclusions that could matter under this root, so a long list
+    // costs nothing on a walk it has no bearing on.
+    let skip = Exclusions::new(
+        options
+            .skip
+            .paths()
+            .iter()
+            .filter(|excluded| excluded.starts_with(root))
+            .cloned(),
+    );
+
     let mut builder = ignore::WalkBuilder::new(root);
     builder
         .standard_filters(false)
         .hidden(false)
         .follow_links(false)
         .same_file_system(options.same_filesystem)
-        .filter_entry(|entry| {
-            !entry
+        .filter_entry(move |entry| {
+            let never = entry
                 .file_name()
                 .to_str()
-                .is_some_and(|name| NEVER_DESCEND.contains(&name))
+                .is_some_and(|name| NEVER_DESCEND.contains(&name));
+            !never && !skip.covers(entry.path())
         });
     if let Some(threads) = options.threads {
         builder.threads(threads);
@@ -357,6 +377,22 @@ mod tests {
     fn finding_by_suffix_in_a_missing_root_is_empty() {
         let found = find_by_suffix(Path::new("/nope"), &[".pacnew"], &WalkOptions::default());
         assert!(found.is_empty());
+    }
+
+    #[test]
+    fn an_excluded_subtree_is_neither_descended_nor_counted() {
+        let root = tempfile::tempdir().unwrap();
+        write(&root.path().join("keep/big.bin"), 50_000);
+        write(&root.path().join("go/small.bin"), 100);
+
+        let options = WalkOptions {
+            skip: Exclusions::new([root.path().join("keep")]),
+            ..WalkOptions::default()
+        };
+        let usage = measure(root.path(), &options).unwrap();
+
+        assert_eq!(usage.files, 1);
+        assert_eq!(usage.size.apparent, 100);
     }
 
     #[test]

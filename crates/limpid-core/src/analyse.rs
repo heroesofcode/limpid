@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use rayon::prelude::*;
 
+use crate::config::Exclusions;
 use crate::size::Size;
 use crate::walk::{self, WalkOptions};
 
@@ -76,8 +77,14 @@ pub fn breakdown(root: &Path, options: &WalkOptions) -> std::io::Result<Breakdow
     // Each child gets its own walk, so the walker's own thread pool would
     // nest inside rayon's. One thread per child walk keeps the total near
     // the core count instead of squaring it.
+    //
+    // Exclusions are deliberately *not* applied here. This is accounting,
+    // and a directory total that silently leaves out what the user excluded
+    // would make the treemap lie about where the space is. Exclusions stop
+    // Limpid *offering* things — see `largest_files` — not counting them.
     let per_child = WalkOptions {
         threads: Some(1),
+        skip: Exclusions::default(),
         ..options.clone()
     };
 
@@ -167,17 +174,23 @@ pub fn largest_files(
     let heap: std::sync::Mutex<BinaryHeap<Reverse<(u64, PathBuf)>>> =
         std::sync::Mutex::new(BinaryHeap::new());
 
+    // Unlike `breakdown`, this list honours exclusions. It is a list of
+    // things worth acting on, and the point of excluding a file is to stop
+    // being shown it — which also leaves room in the list for the next one.
+    let skip = options.skip.clone();
+
     let mut builder = ignore::WalkBuilder::new(root);
     builder
         .standard_filters(false)
         .hidden(false)
         .follow_links(false)
         .same_file_system(options.same_filesystem)
-        .filter_entry(|entry| {
-            !entry
+        .filter_entry(move |entry| {
+            let snapshots = entry
                 .file_name()
                 .to_str()
-                .is_some_and(|name| name == ".snapshots")
+                .is_some_and(|name| name == ".snapshots");
+            !snapshots && !skip.covers(entry.path())
         });
     if let Some(threads) = options.threads {
         builder.threads(threads);
@@ -384,6 +397,40 @@ mod tests {
 
         assert_eq!(survey.breakdown.children.len(), 3);
         assert_eq!(survey.largest.len(), 2);
+    }
+
+    #[test]
+    fn an_excluded_file_is_left_out_of_the_largest_files() {
+        let root = tempfile::tempdir().unwrap();
+        write(&root.path().join("keep/game.iso"), 500_000);
+        write(&root.path().join("other.bin"), 90_000);
+        let options = WalkOptions {
+            skip: Exclusions::new([root.path().join("keep/game.iso")]),
+            ..WalkOptions::default()
+        };
+
+        let found = largest_files(root.path(), 5, &options).unwrap();
+
+        // The one the user asked to stop seeing is gone, and the next one
+        // moves up rather than the list coming back short.
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].name, "other.bin");
+    }
+
+    #[test]
+    fn a_breakdown_still_counts_what_is_excluded() {
+        let root = tempfile::tempdir().unwrap();
+        write(&root.path().join("keep/game.iso"), 500_000);
+        let options = WalkOptions {
+            skip: Exclusions::new([root.path().join("keep/game.iso")]),
+            ..WalkOptions::default()
+        };
+
+        let breakdown = breakdown(root.path(), &options).unwrap();
+
+        // Excluding it stops Limpid offering it, not counting it. Otherwise
+        // the treemap would lie about where the space is.
+        assert_eq!(breakdown.total().apparent, 500_000);
     }
 
     #[test]

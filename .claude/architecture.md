@@ -62,6 +62,7 @@ There is no excuse for a test that reads `$HOME`.
 | Module | What it owns |
 |---|---|
 | `paths` | `Roots`. Where to look. The reason tests are possible. |
+| `config` | `Store`, `Config`, `Policy`, `Exclusions`. What Limpid remembers between runs, in a file that is safe to edit by hand. |
 | `walk` | Parallel measurement on `ignore::WalkBuilder`. Hardlinks counted once, symlinks never followed, `.snapshots`/`.zfs` never descended. |
 | `size` | `Size { apparent, on_disk }`. `on_disk` is `st_blocks * 512` and is the only number that predicts `df`. |
 | `volume` | Filesystem facts that change what a byte count *means*: CoW, compression, snapshots, capacity. |
