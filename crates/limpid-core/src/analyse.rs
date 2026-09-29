@@ -44,10 +44,10 @@ impl Entry {
 pub struct Breakdown {
     /// The directory this describes.
     pub root: PathBuf,
-    /// Everything directly inside it, largest first.
+    /// Everything directly inside it, largest first. A file sitting directly
+    /// in the root is a child like any directory, so this accounts for all
+    /// of it.
     pub children: Vec<Entry>,
-    /// Bytes in files sitting directly in the root rather than in a child.
-    pub loose: Size,
     /// Paths that could not be read.
     pub unreadable: u64,
 }
@@ -55,12 +55,12 @@ pub struct Breakdown {
 impl Breakdown {
     /// Everything this level accounts for.
     pub fn total(&self) -> Size {
-        self.children.iter().map(|child| child.size).sum::<Size>() + self.loose
+        self.children.iter().map(|child| child.size).sum()
     }
 
     /// Whether there is anything here.
     pub fn is_empty(&self) -> bool {
-        self.children.is_empty() && self.loose.is_zero()
+        self.children.is_empty()
     }
 }
 
@@ -81,14 +81,14 @@ pub fn breakdown(root: &Path, options: &WalkOptions) -> std::io::Result<Breakdow
         ..options.clone()
     };
 
-    let measured: Vec<(Option<Entry>, Size, u64)> = entries
+    let measured: Vec<(Option<Entry>, u64)> = entries
         .par_iter()
         .map(|entry| {
             let path = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
 
             let Ok(metadata) = entry.metadata() else {
-                return (None, Size::ZERO, 1);
+                return (None, 1);
             };
 
             if metadata.is_dir() {
@@ -101,10 +101,9 @@ pub fn breakdown(root: &Path, options: &WalkOptions) -> std::io::Result<Breakdow
                             files: usage.files,
                             is_dir: true,
                         }),
-                        Size::ZERO,
                         usage.unreadable,
                     ),
-                    Err(_) => (None, Size::ZERO, 1),
+                    Err(_) => (None, 1),
                 }
             } else if metadata.is_file() {
                 // A large file sitting directly in the directory is a
@@ -118,11 +117,10 @@ pub fn breakdown(root: &Path, options: &WalkOptions) -> std::io::Result<Breakdow
                         files: 1,
                         is_dir: false,
                     }),
-                    size,
                     0,
                 )
             } else {
-                (None, Size::ZERO, 0)
+                (None, 0)
             }
         })
         .collect();
@@ -131,17 +129,12 @@ pub fn breakdown(root: &Path, options: &WalkOptions) -> std::io::Result<Breakdow
         root: root.to_owned(),
         ..Breakdown::default()
     };
-    for (entry, loose, unreadable) in measured {
+    for (entry, unreadable) in measured {
         if let Some(entry) = entry {
             breakdown.children.push(entry);
         }
-        breakdown.loose += loose;
         breakdown.unreadable += unreadable;
     }
-
-    // The loose total double-counted the files that also became children;
-    // they are children, so take it back out.
-    breakdown.loose = Size::ZERO;
 
     breakdown.children.sort_by(|a, b| {
         b.size

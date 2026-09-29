@@ -37,8 +37,12 @@ Missing today, and present in every competitor:
   outright because trashing them frees nothing; both rules follow from the
   same question, asked about different content.
 - Delete permanently, behind a second confirmation
-- Open containing folder, copy path
-- Exclude a finding from future scans
+- Open containing folder, copy path — done: revealed through
+  `org.freedesktop.FileManager1`, which selects the file, with `xdg-open` on
+  the parent as the fallback
+- Exclude a finding from future scans — **moved to 0.4**, to ship with the
+  config file. An exclusion that is forgotten on the next launch is worse
+  than having none.
 - **A second safety model for this.** `Guard` is an allowlist of boundaries;
   the storage view shows arbitrary paths outside all of them. The distinction
   that resolves it: the guard exists to protect against *the program* being
@@ -76,12 +80,22 @@ that can lose something irreplaceable.
   remove an implausible share of the disk
 - Render `Guard::boundaries()` in Settings. The safety model is the product's
   best argument and it is currently invisible.
-- Fix: `describe_from_mountinfo` discards the whole mount table when any line
-  fails to parse — the `?` operators sit inside the loop. Silent, and it costs
-  the btrfs caveat.
-- Fix: `remove_coredumps` follows symlinks, contrary to its own comment
-- Fix: `Breakdown::loose` is accumulated and then unconditionally zeroed
-- Fix: `sha256sums=('SKIP')` in the PKGBUILD
+
+Of the four fixes listed here when 0.4 was planned, checked against the code
+on 2026-09-29:
+
+- `describe_from_mountinfo` discarding the whole table on one bad line —
+  real, fixed. A `?` inside the loop returned from the function.
+- `remove_coredumps` following symlinks — **was wrong.** `DirEntry::metadata`
+  does not traverse a link, so symlinks were skipped all along. What was
+  wrong was the comment, which said they were removed as links. Corrected,
+  and the behaviour now has a test instead of an assertion.
+- `Breakdown::loose` — real but harmless: accumulated, then always zeroed,
+  so it never affected a number. Removed.
+- `sha256sums=('SKIP')` in the PKGBUILD — real, and it belongs to publishing
+  rather than to 0.4. A tag's source archive has no checksum until the tag
+  exists; the sum is filled in with `updpkgsums` when the AUR package is
+  published.
 
 ## 0.5 — Generic findings
 

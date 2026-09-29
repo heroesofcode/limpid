@@ -51,11 +51,20 @@ pub fn describe_from_mountinfo(mounts: &str, path: &Path) -> Option<Volume> {
         // Format: id parent major:minor root mount-point options... - fstype source super-options
         // The optional fields before the "-" separator are why this is not a
         // simple fixed-column split.
-        let (before, after) = line.split_once(" - ")?;
+        // `continue`, not `?`. Inside the loop a `?` returns from the whole
+        // function, so one line that failed to parse threw away every mount
+        // already read — and with it, silently, the btrfs caveats.
+        let Some((before, after)) = line.split_once(" - ") else {
+            continue;
+        };
         let mut head = before.split_whitespace();
-        let mount_point = head.nth(4)?;
+        let Some(mount_point) = head.nth(4) else {
+            continue;
+        };
         let mut tail = after.split_whitespace();
-        let filesystem = tail.next()?;
+        let Some(filesystem) = tail.next() else {
+            continue;
+        };
         let super_options = tail.nth(1).unwrap_or("");
 
         if !path.starts_with(mount_point) {
@@ -194,6 +203,18 @@ mod tests {
 
         assert_eq!(volume.mount_point, Path::new("/var/cache/pacman/pkg"));
         assert_eq!(volume.filesystem, "btrfs");
+    }
+
+    #[test]
+    fn a_line_that_does_not_parse_costs_only_itself() {
+        // A malformed line ahead of the one that matters. The parser used to
+        // give up on the whole table at the first bad line.
+        let table = format!("this line has no separator at all\n{MOUNTINFO}");
+
+        let volume = describe_from_mountinfo(&table, Path::new("/home/someone")).unwrap();
+
+        assert_eq!(volume.filesystem, "btrfs");
+        assert!(volume.copy_on_write);
     }
 
     #[test]
