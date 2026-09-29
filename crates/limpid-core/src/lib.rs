@@ -28,6 +28,7 @@
 pub mod analyse;
 pub mod browser;
 pub mod catalog;
+pub mod config;
 pub mod execute;
 pub mod guard;
 pub mod model;

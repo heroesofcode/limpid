@@ -21,8 +21,6 @@ Missing today, and present in every competitor:
   `node_modules/`. This is the largest single gap by measured bytes.
 - No concept of old or unused files.
 - No history, no undo.
-- No exclusions.
-- No config file at all — settings persist nothing.
 - Scan progress is a spinner: no percentage, no current path, no cancel.
 - No search or filter.
 
@@ -69,8 +67,14 @@ cache; being wrong costs a re-download. From 0.5 it touches photographs and
 documents. The trust infrastructure has to exist before the first feature
 that can lose something irreplaceable.
 
-- A config file. The project has none today.
-- A managed exclusion list, honoured by every scanner and by the storage view
+- A config file — **done** in the engine and the CLI:
+  `~/.config/limpid/config.toml`, versioned from the first release, edited
+  with `toml_edit` so a save keeps the person's comments and touches only the
+  keys that changed. Policy (`keep_package_versions`, `keep_journal_days`)
+  flows into the operations the helper is asked for.
+- A managed exclusion list — **done** in the engine and the CLI, enforced by
+  the scanners *and* the executor. The interface — an exclude action in the
+  Overview and the storage view, and the list in Settings — is the next PR.
 - History of every run: what was removed, how big, where it went, when
 - Undo for anything that went to the trash
 - Directory selection in the storage view, now that there is an undo

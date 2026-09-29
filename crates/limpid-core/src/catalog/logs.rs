@@ -9,12 +9,6 @@ use super::Context;
 use crate::model::{Category, Kind, Risk, Target};
 use crate::privileged::Operation;
 
-/// Journal history kept when it is trimmed.
-///
-/// Two weeks is about the shortest window that still answers "what changed
-/// before this started happening", which is most of what a journal is for.
-const KEEP_DAYS: u16 = 14;
-
 /// Measure the journal and the coredump store.
 pub fn scan(context: &Context) -> Category {
     let roots = &context.roots;
@@ -23,15 +17,16 @@ pub fn scan(context: &Context) -> Category {
         "What the system recorded about its own past.",
     );
 
+    let days = context.config.policy.keep_journal_days;
     category.targets.push(
         Target::new("System journal", Kind::Log, Risk::Review)
-            .detail(
-                "Everything systemd has logged. Trimming to the last fourteen days is safe \
+            .detail(format!(
+                "Everything systemd has logged. Trimming to the last {days} days is safe \
                  for the running system; what it costs is the history you would want \
                  the next time something breaks.",
-            )
+            ))
             .path(roots.system("/var/log/journal"))
-            .by_operation(Operation::VacuumJournal { days: KEEP_DAYS }),
+            .by_operation(Operation::VacuumJournal { days }),
     );
 
     category.targets.push(
@@ -65,6 +60,30 @@ mod tests {
                 target.name,
             );
         }
+    }
+
+    #[test]
+    fn the_journal_window_comes_from_the_config() {
+        let fixture = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::default();
+        config.policy.keep_journal_days = 30;
+
+        let category = scan(&Context::with_config(Roots::under(fixture.path()), config));
+        let journal = category
+            .targets
+            .iter()
+            .find(|target| target.name == "System journal")
+            .unwrap();
+
+        assert_eq!(
+            journal.privileged,
+            Some(Operation::VacuumJournal { days: 30 })
+        );
+        assert!(
+            journal.detail.contains("last 30 days"),
+            "{}",
+            journal.detail
+        );
     }
 
     #[test]

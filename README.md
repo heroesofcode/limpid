@@ -85,7 +85,42 @@ limpid-cli clean --apply     # actually do it
 limpid-cli clean --risk review --apply
 limpid-cli storage                     # where the space went
 limpid-cli storage --path ~/Downloads
+limpid-cli config                      # what Limpid remembers
+limpid-cli exclude ~/.cache/thumbnails # never offer or remove this
+limpid-cli exclude --remove ~/.cache/thumbnails
 ```
+
+## Configuration
+
+`~/.config/limpid/config.toml`, created the first time something is saved.
+It is meant to be edited by hand as much as by Limpid:
+
+```toml
+version = 1
+
+[policy]
+# Versions of each package pacman keeps for downgrading.
+keep_package_versions = 3
+# Days of system journal kept.
+keep_journal_days = 14
+
+[exclude]
+paths = [
+    "~/.cache/thumbnails",
+    "~/Projects/keep-this",
+]
+```
+
+An excluded path is never offered and never removed — including when it sits
+inside a directory Limpid is emptying, in which case everything around it
+goes and it stays. The storage view still counts it, because a total that
+left it out would lie about where the space is.
+
+Saving touches only the settings that changed: your comments, your order and
+any setting you did not change stay exactly as you wrote them. A typo in one
+setting costs that setting, with a warning, not the whole file. A file that
+is not valid TOML, or that a newer Limpid wrote, is read as the defaults and
+never overwritten.
 
 Both front-ends take `--root`, which points the whole engine at a directory
 instead of the real filesystem. That is how the test suite runs, and it is a
@@ -132,6 +167,9 @@ some capability for it:
   undecryptable.
 - **No blanket rules.** Removing orphan packages asks per package. `.pacnew`
   files are reported as work to do, never as reclaimable space.
+- **An exclusion is a refusal, not a filter.** The scanners leave excluded
+  paths out, and the executor refuses them too, so a selection made before
+  the exclusion was added still cannot remove what was excluded.
 
 ## Roadmap
 

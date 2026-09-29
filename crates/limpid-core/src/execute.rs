@@ -11,6 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::config::Exclusions;
 use crate::guard::{Guard, Refusal};
 use crate::paths::Roots;
 use crate::plan::{Disposal, Item, Plan};
@@ -27,6 +28,11 @@ pub enum Problem {
         /// The process holding it.
         holder: String,
     },
+    /// The user excluded it. Reported rather than silently skipped, because
+    /// it only reaches the executor through a plan built before the
+    /// exclusion, and the person who pressed the button should hear that
+    /// part of it was not done.
+    Excluded(PathBuf),
     /// The guard would not allow it.
     Refused(Refusal),
     /// The filesystem would not allow it.
@@ -45,6 +51,13 @@ impl std::fmt::Display for Problem {
                 formatter,
                 "{item}: {holder} still has files open there. Close it and scan again.",
             ),
+            Self::Excluded(path) => {
+                write!(
+                    formatter,
+                    "{} is excluded, and was left alone",
+                    path.display()
+                )
+            }
             Self::Refused(refusal) => write!(formatter, "{refusal}"),
             Self::Failed { path, reason } => write!(formatter, "{}: {reason}", path.display()),
         }
@@ -83,6 +96,7 @@ pub struct Executor {
     guard: Guard,
     walk: WalkOptions,
     apply: bool,
+    exclusions: Exclusions,
 }
 
 impl Executor {
@@ -92,6 +106,7 @@ impl Executor {
             guard: Guard::new(roots),
             walk: WalkOptions::default(),
             apply: false,
+            exclusions: Exclusions::default(),
         }
     }
 
@@ -104,7 +119,21 @@ impl Executor {
             guard: Guard::new(roots),
             walk: WalkOptions::default(),
             apply: true,
+            exclusions: Exclusions::default(),
         }
+    }
+
+    /// Refuse, and preserve, everything the user has excluded.
+    ///
+    /// The scanners already leave excluded paths out, so this is the second
+    /// line: a plan built from a selection made before an exclusion was
+    /// added still cannot remove what was excluded. Hiding something the
+    /// user asked to keep is a courtesy; this is the guarantee.
+    #[must_use]
+    pub fn with_exclusions(mut self, exclusions: Exclusions) -> Self {
+        self.walk.skip = exclusions.clone();
+        self.exclusions = exclusions;
+        self
     }
 
     /// Whether this executor changes anything.
@@ -146,6 +175,11 @@ impl Executor {
         }
 
         for path in &item.paths {
+            if self.exclusions.covers(path) {
+                outcome.problems.push(Problem::Excluded(path.clone()));
+                continue;
+            }
+
             // Checked here, against the filesystem as it is now, rather than
             // when the plan was assembled — and under the permission the
             // item was created with, so a scanner's path can never be given
@@ -185,9 +219,51 @@ impl Executor {
         };
 
         for entry in entries.flatten() {
-            outcome.absorb(self.remove(&entry.path(), disposal));
+            outcome.absorb(self.clear(&entry.path(), disposal));
         }
 
+        outcome
+    }
+
+    /// Remove `path`, unless something inside it is excluded.
+    ///
+    /// Emptying a directory removes each entry wholesale, which would take
+    /// an excluded subdirectory with it. So an entry with an exclusion
+    /// somewhere below is descended into instead, level by level, and only
+    /// what is not excluded goes. An entry that is itself excluded is left
+    /// without comment: the user asked to clean the directory around it and
+    /// to keep this, and both are being honoured.
+    fn clear(&self, path: &Path, disposal: Disposal) -> Outcome {
+        if self.exclusions.covers(path) {
+            return Outcome::default();
+        }
+
+        if !self.exclusions.inside(path) {
+            return self.remove(path, disposal);
+        }
+
+        // Only a real directory is descended into. A symlink is removed as
+        // a link, which cannot touch what it points at — and what is excluded
+        // "inside" it lexically lives somewhere else entirely.
+        let is_directory = std::fs::symlink_metadata(path)
+            .map(|metadata| metadata.is_dir())
+            .unwrap_or(false);
+        if !is_directory {
+            return self.remove(path, disposal);
+        }
+
+        let mut outcome = Outcome::default();
+        match std::fs::read_dir(path) {
+            Ok(entries) => {
+                for entry in entries.flatten() {
+                    outcome.absorb(self.clear(&entry.path(), disposal));
+                }
+            }
+            Err(error) => outcome.problems.push(Problem::Failed {
+                path: path.to_owned(),
+                reason: error.to_string(),
+            }),
+        }
         outcome
     }
 
@@ -497,6 +573,121 @@ mod tests {
             outcome.problems[0],
             Problem::Refused(Refusal::OutOfBounds(_))
         ));
+        assert!(film.exists());
+    }
+
+    #[test]
+    fn an_item_naming_an_excluded_path_is_refused_and_left_alone() {
+        // A plan built before the exclusion was added: the scanner would not
+        // offer it now, and the executor must not remove it either.
+        let (_fixture, roots, cache) = populated_cache();
+        let plan = plan_for("thumbnails", &cache, Kind::Cache);
+
+        let outcome = Executor::applying(&roots)
+            .with_exclusions(Exclusions::new([cache.clone()]))
+            .run(&plan);
+
+        assert!(matches!(&outcome.problems[..], [Problem::Excluded(path)] if path == &cache));
+        assert_eq!(outcome.reclaimed, Size::ZERO);
+        assert!(cache.join("a.png").exists());
+    }
+
+    #[test]
+    fn an_exclusion_inside_a_directory_being_emptied_survives_it() {
+        let (_fixture, roots, cache) = populated_cache();
+        let keep = cache.join("large");
+
+        let outcome = Executor::applying(&roots)
+            .with_exclusions(Exclusions::new([keep.clone()]))
+            .run(&plan_for("thumbnails", &cache, Kind::Cache));
+
+        // Emptying removes each entry wholesale; the excluded one had to be
+        // stepped around rather than swept up with the rest.
+        assert!(outcome.is_clean(), "{:?}", outcome.problems);
+        assert!(keep.join("c.png").exists());
+        assert!(!cache.join("a.png").exists());
+        assert!(!cache.join("b.png").exists());
+        assert_eq!(outcome.reclaimed.apparent, 3000);
+    }
+
+    #[test]
+    fn a_deeply_nested_exclusion_keeps_only_itself() {
+        let fixture = tempfile::tempdir().unwrap();
+        let roots = Roots::under(fixture.path());
+        let cache = roots.cache("yay");
+        write(&cache.join("brave-bin/src/brave.tar"), 900);
+        write(&cache.join("brave-bin/pkg/brave.pkg"), 400);
+        write(&cache.join("other/stale.tar"), 100);
+        let keep = cache.join("brave-bin/src");
+
+        let outcome = Executor::applying(&roots)
+            .with_exclusions(Exclusions::new([keep.clone()]))
+            .run(&plan_for("yay", &cache, Kind::BuildArtifact));
+
+        assert!(outcome.is_clean(), "{:?}", outcome.problems);
+        // Kept: the excluded directory and the one above it, which cannot
+        // go while it holds something excluded.
+        assert!(keep.join("brave.tar").exists());
+        // Gone: every sibling at every level on the way down.
+        assert!(!cache.join("brave-bin/pkg").exists());
+        assert!(!cache.join("other").exists());
+        assert_eq!(outcome.reclaimed.apparent, 500);
+    }
+
+    #[test]
+    fn a_dry_run_and_a_real_run_agree_when_something_is_excluded() {
+        let (_fixture, roots, cache) = populated_cache();
+        let exclusions = Exclusions::new([cache.join("large")]);
+        let plan = plan_for("thumbnails", &cache, Kind::Cache);
+
+        let predicted = Executor::dry_run(&roots)
+            .with_exclusions(exclusions.clone())
+            .run(&plan);
+        let actual = Executor::applying(&roots)
+            .with_exclusions(exclusions)
+            .run(&plan);
+
+        assert_eq!(predicted.reclaimed, actual.reclaimed);
+        assert_eq!(predicted.files, actual.files);
+    }
+
+    #[test]
+    fn a_symlink_whose_lexical_inside_is_excluded_is_removed_as_a_link_only() {
+        // The exclusion names a path "inside" the link, which really lives
+        // wherever the link points. Removing the link cannot reach it.
+        let fixture = tempfile::tempdir().unwrap();
+        let roots = Roots::under(fixture.path());
+        let elsewhere = roots.home("Documents");
+        write(&elsewhere.join("keep.txt"), 50);
+        let cache = roots.cache("thumbnails");
+        write(&cache.join("a.png"), 100);
+        std::os::unix::fs::symlink(&elsewhere, cache.join("link")).unwrap();
+
+        let outcome = Executor::applying(&roots)
+            .with_exclusions(Exclusions::new([cache.join("link/keep.txt")]))
+            .run(&plan_for("thumbnails", &cache, Kind::Cache));
+
+        assert!(outcome.is_clean(), "{:?}", outcome.problems);
+        assert!(!cache.join("link").exists());
+        assert!(elsewhere.join("keep.txt").exists());
+    }
+
+    #[test]
+    fn a_chosen_file_that_is_excluded_is_refused() {
+        let fixture = tempfile::tempdir().unwrap();
+        let roots = Roots::under(fixture.path());
+        let film = roots.home("Videos/keep.mkv");
+        write(&film, 4096);
+
+        let plan = Plan::from_chosen(
+            [(film.clone(), Size::new(4096, 4096))],
+            crate::plan::Disposal::Delete,
+        );
+        let outcome = Executor::applying(&roots)
+            .with_exclusions(Exclusions::new([film.clone()]))
+            .run(&plan);
+
+        assert!(matches!(outcome.problems[0], Problem::Excluded(_)));
         assert!(film.exists());
     }
 

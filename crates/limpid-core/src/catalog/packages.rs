@@ -9,12 +9,6 @@ use super::Context;
 use crate::model::{Category, Kind, Risk, Target};
 use crate::privileged::Operation;
 
-/// Package versions kept when the cache is trimmed.
-///
-/// `paccache`'s own default. Three is enough to get back past a bad update
-/// without the cache being most of what it was.
-const KEEP_VERSIONS: u8 = 3;
-
 /// Measure package manager caches.
 pub fn scan(context: &Context) -> Category {
     let roots = &context.roots;
@@ -23,17 +17,19 @@ pub fn scan(context: &Context) -> Category {
         "Downloaded packages and build trees, re-fetchable from the mirrors.",
     );
 
+    // The figure is the user's, from the config file, and it goes into the
+    // explanation as well as the operation: what the confirmation promises
+    // and what the helper is asked to do must be the same number.
+    let keep = context.config.policy.keep_package_versions;
     category.targets.push(
         Target::new("pacman package cache", Kind::PackageCache, Risk::Review)
-            .detail(
+            .detail(format!(
                 "Every package version pacman has downloaded. Keeping the last few \
                  is what makes a downgrade possible after a bad update, so Limpid \
-                 trims rather than empties it.",
-            )
+                 keeps the newest {keep} of each and removes the rest.",
+            ))
             .path(roots.system("/var/cache/pacman/pkg"))
-            .by_operation(Operation::TrimPackageCache {
-                keep: KEEP_VERSIONS,
-            }),
+            .by_operation(Operation::TrimPackageCache { keep }),
     );
 
     // yay keeps the upstream tarball and the extracted build tree per package;
@@ -185,6 +181,27 @@ mod tests {
                 .iter()
                 .any(|t| t.name == "Unmerged configuration")
         );
+    }
+
+    #[test]
+    fn the_number_of_versions_kept_comes_from_the_config() {
+        let fixture = tempfile::tempdir().unwrap();
+        let mut config = crate::config::Config::default();
+        config.policy.keep_package_versions = 5;
+
+        let category = scan(&Context::with_config(Roots::under(fixture.path()), config));
+        let target = category
+            .targets
+            .iter()
+            .find(|target| target.name == "pacman package cache")
+            .unwrap();
+
+        assert_eq!(
+            target.privileged,
+            Some(Operation::TrimPackageCache { keep: 5 })
+        );
+        // And the explanation says the same number the helper will be given.
+        assert!(target.detail.contains("newest 5"), "{}", target.detail);
     }
 
     #[test]

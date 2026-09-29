@@ -9,6 +9,7 @@ use iced::{Element, Length, Subscription, Task};
 
 use limpid_core::analyse::{self, Survey};
 use limpid_core::catalog::{self, Context};
+use limpid_core::config::{Exclusions, Store};
 use limpid_core::execute::{Executor, Outcome};
 use limpid_core::model::{Scan, Target};
 use limpid_core::paths::Roots;
@@ -332,7 +333,10 @@ impl State {
         Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
-                    Executor::applying(&Roots::from_env()).run(&plan)
+                    let roots = Roots::from_env();
+                    Executor::applying(&roots)
+                        .with_exclusions(exclusions(&roots))
+                        .run(&plan)
                 })
                 .await
                 .unwrap_or_default()
@@ -405,8 +409,11 @@ impl State {
                 Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
-                            analyse::survey(&path, LARGEST_FILES, &WalkOptions::default())
-                                .unwrap_or_default()
+                            let options = WalkOptions {
+                                skip: exclusions(&Roots::from_env()),
+                                ..WalkOptions::default()
+                            };
+                            analyse::survey(&path, LARGEST_FILES, &options).unwrap_or_default()
                         })
                         .await
                         .unwrap_or_default()
@@ -553,7 +560,10 @@ impl State {
                 Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
-                            let outcome = Executor::applying(&Roots::from_env()).run(&plan);
+                            let roots = Roots::from_env();
+                            let outcome = Executor::applying(&roots)
+                                .with_exclusions(exclusions(&roots))
+                                .run(&plan);
 
                             // Asked for second, and only when there is
                             // something to ask about: an authentication
@@ -733,6 +743,16 @@ pub fn placeholder<'a>(
     )
     .center_x(Length::Fill)
     .into()
+}
+
+/// What the person asked never to be offered or removed, read from the file
+/// as it is now.
+///
+/// Read at the moment of acting rather than once at start-up, so an
+/// exclusion added by hand while the window is open is honoured by the next
+/// removal — the same reason `Guard` checks the filesystem as it is then.
+fn exclusions(roots: &Roots) -> Exclusions {
+    Store::open(roots).config.exclusions
 }
 
 #[cfg(test)]

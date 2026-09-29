@@ -13,6 +13,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use limpid_core::analyse::{self, Breakdown, Entry};
 use limpid_core::catalog::{self, Context};
+use limpid_core::config::{self, Store};
 use limpid_core::execute::{Executor, Outcome, Problem};
 use limpid_core::model::{Risk, Scan};
 use limpid_core::paths::{ROOT_OVERRIDE, Roots};
@@ -87,6 +88,20 @@ enum Command {
         #[arg(long, default_value_t = 10)]
         files: usize,
     },
+    /// Show the settings in force, and where they came from.
+    Config,
+    /// Stop Limpid offering a path, or everything under it. The path is
+    /// still counted where space is being accounted for; it is only never
+    /// offered for removal, and never removed.
+    Exclude {
+        /// Stop excluding these paths instead.
+        #[arg(long)]
+        remove: bool,
+        /// Paths to exclude. Relative paths are taken from the current
+        /// directory; `~/` means the home directory.
+        #[arg(required = true, value_name = "PATH")]
+        paths: Vec<PathBuf>,
+    },
     /// Show the palette Limpid would draw with, and where it came from.
     Theme {
         /// Resolve this colors.toml instead of the active theme.
@@ -109,7 +124,19 @@ fn main() -> Result<()> {
         Some(root) => Roots::under(root),
         None => Roots::from_env(),
     };
-    let context = Context::with_roots(roots);
+
+    // Read once, up front. A problem with the file is reported and never
+    // fatal: every setting has a default, and refusing to scan because of a
+    // typo in a config file would be the wrong way round.
+    let mut store = Store::open(&roots);
+    // `config` shows them in its own report; everything else hears about
+    // them here, once.
+    if !matches!(cli.command, Command::Config) {
+        for warning in &store.warnings {
+            eprintln!("limpid: {warning}");
+        }
+    }
+    let context = Context::with_config(roots, store.config.clone());
 
     let result = match cli.command {
         Command::Scan { json } => {
@@ -145,7 +172,8 @@ fn main() -> Result<()> {
                 Executor::applying(&context.roots)
             } else {
                 Executor::dry_run(&context.roots)
-            };
+            }
+            .with_exclusions(context.config.exclusions.clone());
             let outcome = executor.run(&plan);
 
             // The privileged half is a separate request to a separate
@@ -178,6 +206,48 @@ fn main() -> Result<()> {
                     std::process::exit(1);
                 }
             }
+        }
+        Command::Config => {
+            let colour = io::stdout().is_terminal();
+            let mut stdout = io::stdout().lock();
+            show_config(&mut stdout, &store, &context.roots.home, colour)
+        }
+        Command::Exclude { remove, paths } => {
+            if !store.is_writable() {
+                eprintln!(
+                    "limpid: {} could not be read, so it will not be overwritten; fix it or remove it",
+                    store.path().display(),
+                );
+                std::process::exit(1);
+            }
+
+            let home = context.roots.home.clone();
+            for path in paths {
+                // The shell expands an unquoted ~; a quoted one arrives as
+                // written, and means the same thing.
+                let absolute = config::expand(&path.to_string_lossy(), &home)
+                    .or_else(|| std::path::absolute(&path).ok());
+                let Some(absolute) = absolute else {
+                    eprintln!("limpid: cannot make sense of {}", path.display());
+                    std::process::exit(1);
+                };
+                let changed = if remove {
+                    store.config.exclusions.remove(&absolute)
+                } else {
+                    store.config.exclusions.add(absolute.clone())
+                };
+                let verb = match (remove, changed) {
+                    (false, true) => "excluded",
+                    (false, false) => "already excluded",
+                    (true, true) => "no longer excluded",
+                    (true, false) => "was not excluded",
+                };
+                println!("{verb}: {}", absolute.display());
+            }
+
+            store
+                .save()
+                .map_err(|error| io::Error::other(error.to_string()))
         }
         Command::Theme { file } => {
             let theme = match &file {
@@ -413,6 +483,7 @@ fn report_clean(
     for problem in &outcome.problems {
         let label = match problem {
             Problem::InUse { .. } => "in use",
+            Problem::Excluded(_) => "excluded",
             Problem::Refused(_) => "refused",
             Problem::Failed { .. } => "failed",
         };
@@ -510,6 +581,60 @@ fn bar(share: f32, width: usize) -> String {
         bar.push(' ');
     }
     bar
+}
+
+/// Print the settings in force.
+fn show_config(
+    out: &mut impl Write,
+    store: &Store,
+    home: &std::path::Path,
+    colour: bool,
+) -> io::Result<()> {
+    let style = Style { enabled: colour };
+    let shown = |path: &std::path::Path| match path.strip_prefix(home) {
+        Ok(rest) => format!("~/{}", rest.display()),
+        Err(_) => path.display().to_string(),
+    };
+
+    let state = if !store.path().exists() {
+        "not created yet; these are the defaults"
+    } else if store.is_writable() {
+        "in use"
+    } else {
+        "read, but will not be overwritten"
+    };
+    writeln!(
+        out,
+        "{}  {}",
+        style.bold(&shown(store.path())),
+        style.dim(state)
+    )?;
+
+    let policy = store.config.policy;
+    writeln!(out)?;
+    writeln!(
+        out,
+        "  Package versions kept  {}",
+        policy.keep_package_versions
+    )?;
+    writeln!(out, "  Journal days kept      {}", policy.keep_journal_days)?;
+
+    writeln!(out)?;
+    let excluded = store.config.exclusions.paths();
+    if excluded.is_empty() {
+        writeln!(out, "  Nothing excluded")?;
+    } else {
+        writeln!(out, "  Excluded")?;
+        for path in excluded {
+            writeln!(out, "    {}", shown(path))?;
+        }
+    }
+
+    for warning in &store.warnings {
+        writeln!(out, "\n{}", style.paint("33", warning))?;
+    }
+
+    Ok(())
 }
 
 /// Print the resolved palette, with a swatch of each colour.

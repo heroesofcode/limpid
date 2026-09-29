@@ -106,9 +106,12 @@ Cleaning a live Chromium profile does not free the space while the
 descriptors are open, and can make it discard the whole database rather than
 the part you asked for.
 
-> **Known gap.** This is currently checked at scan time only, never
-> re-checked at the moment of removal — the one safety rule that does not yet
-> follow rule 2. See @.claude/roadmap.md.
+It is checked twice, and the two checks answer different questions. The
+scan records whether the browser was open then (`Target::blocked`); the
+executor checks again immediately before removing anything
+(`Target::requires_idle`), because a browser closed when the list was drawn
+may be open by the time someone reads it and presses the button. Dry runs
+check too, or the preview would promise bytes the real run will not deliver.
 
 ## 8. No blanket rules
 
@@ -119,6 +122,45 @@ the part you asked for.
   Deleting one unmerged means silently running without a change upstream
   thought necessary.
 - Nothing that needs a human decision is ticked by default.
+
+## 9. An exclusion is a guarantee, not a filter
+
+`Exclusions` in `crates/limpid-core/src/config.rs`. Enforced in two places on
+purpose:
+
+- **The scanners leave excluded paths out**, before measuring, so they are
+  never offered and never counted in what would be reclaimed.
+- **The executor refuses them** (`Executor::with_exclusions`). A plan built
+  from a selection made before the exclusion was added still cannot remove
+  what was excluded. Hiding something the user asked to keep is a courtesy;
+  refusing to delete it is the guarantee.
+
+An exclusion *inside* a directory being emptied survives it. Emptying removes
+each entry wholesale, so an entry with an exclusion somewhere below is
+descended into instead, level by level, and only what is not excluded goes.
+A symlink is never descended into: removing the link cannot reach whatever
+is excluded "inside" it, because that lives where the link points.
+
+The storage view still *counts* excluded files in its totals and treemap.
+Excluding something stops Limpid offering it, not accounting for it — a
+total that silently omitted excluded bytes would make the treemap lie about
+where the space is.
+
+## 10. The config file belongs to the person who wrote it
+
+`Store` in `config.rs`. It is safe to edit by hand, which means:
+
+- **An unreadable file is never overwritten.** Not valid TOML, or written by
+  a newer Limpid: it is read as defaults, reported, and left alone. `save`
+  refuses.
+- **A save touches only what changed.** Comments, order, unknown keys, and
+  settings nobody has changed since the file was read are left exactly as
+  written — including an invalid value the person has not fixed yet, which
+  would otherwise be silently replaced by the default it was being read as.
+- **One bad value costs only itself.** A typo in one setting is a warning and
+  a default for that setting, never a refusal to start.
+- Policy values are bounded by the privileged helper's own limits, so the
+  config file cannot produce an operation the helper would refuse.
 
 ## Checklist for adding a scanner
 
