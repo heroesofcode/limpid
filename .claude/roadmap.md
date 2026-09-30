@@ -1,48 +1,53 @@
 # Roadmap to 1.0
 
-What a user can *do* with Limpid, release by release. The README's phase
-table records what has been built; this records what to build next.
+What a user can *do* with Limpid, release by release. The README's roadmap
+table is the short version of this; this records what to build next and why
+in this order.
 
 ## Where we stand
 
 The engine is ahead of the field — copy-on-write accounting, the two-tree
 browser scan, a guard that re-checks at the moment of action, a privilege
 split where no path crosses the boundary. What is behind is how much of that
-engine a user can reach.
+engine a user can reach, and how many users there are to reach it.
 
-Missing today, and present in every competitor:
+Checked on 2026-09-30:
 
-- The storage view is **read-only**. You can see a 4 GB file and do nothing.
-- No duplicate detection.
+- **Nobody uses it yet.** One star, two unique visitors, not on the AUR. The
+  PKGBUILD exists and has never been published. Every safety feature so far
+  protects users who do not exist, and nothing has been learned from anyone
+  who is not building it.
 - **No coverage of project build artifacts.** Measured on the reference
   machine on 2026-09-26: **17.04 GiB**, which was 48% of the home directory,
   and Limpid reported none of it. `catalog/development.rs` covers
   `~/.cargo` and `~/.npm`; nothing covers a project's own `target/` or
-  `node_modules/`. This is the largest single gap by measured bytes.
-- No concept of old or unused files.
-- No history, no undo.
+  `node_modules/`. Limpid finds about 5 GB on the same machine, so this one
+  gap is three times everything it does today.
+- The storage view acts on **files only**. The large things in a treemap are
+  directories, and one can be seen at 10 GB and not acted on.
+- No duplicate detection, and no concept of old or unused files.
+- No history, no undo inside Limpid. What goes to the trash can be restored
+  from the file manager. What is deleted outright is either regenerable or a
+  file the person chose to delete permanently, behind a second confirmation.
 - Scan progress is a spinner: no percentage, no current path, no cancel.
 - No search or filter.
 
 ---
 
-## 0.3 — Act from the storage view
+## 0.3 — Act from the storage view (released)
 
-- Select files and directories in the treemap and the largest-files list
+- Select files in the treemap and the largest-files list
 - Move to trash — the default, and correct here for a reason that inverts
   the Overview's: this is the user's own data, and trashing a 4 GB ISO is a
   rename, so it is instant and reversible. The Overview deletes caches
   outright because trashing them frees nothing; both rules follow from the
   same question, asked about different content.
 - Delete permanently, behind a second confirmation
-- Open containing folder, copy path — done: revealed through
+- Open containing folder, copy path — revealed through
   `org.freedesktop.FileManager1`, which selects the file, with `xdg-open` on
   the parent as the fallback. The per-row buttons only appear where there is
   room, so both are also on the action bar whenever exactly one file is
   ticked — reachable at any width.
-- Exclude a finding from future scans — **moved to 0.4**, to ship with the
-  config file. An exclusion that is forgotten on the next launch is worse
-  than having none.
 - **A second safety model for this.** `Guard` is an allowlist of boundaries;
   the storage view shows arbitrary paths outside all of them. The distinction
   that resolves it: the guard exists to protect against *the program* being
@@ -51,9 +56,7 @@ Missing today, and present in every competitor:
   depend on guessing still applies (nothing outside `$HOME`, no symlink,
   never `$HOME` itself, never `.ssh`), but the boundary list stops being the
   criterion. One path per action, and never a path the user has not seen on
-  screen. Settle this before drawing any button.
-- Files only. Selecting a *directory* in the treemap is a much larger blast
-  radius and waits for history and undo in 0.4.
+  screen.
 
 The four safety fixes this release depended on are done — the guard checks
 every path component for symlinks rather than only the leaf, the
@@ -62,61 +65,32 @@ browser-in-use test is re-run by the executor at the moment of removal,
 system, and storage walks carry a generation so a superseded result cannot
 overwrite the current one and leave a tick pointing at the wrong file.
 
-## 0.4 — Trust and memory
+## 0.4 — The largest win, and a first release people can install
 
-Deliberately before 0.5. Everything Limpid removes today is regenerable
-cache; being wrong costs a re-download. From 0.5 it touches photographs and
-documents. The trust infrastructure has to exist before the first feature
-that can lose something irreplaceable.
+Everything here either regenerates itself or goes to the trash, so none of it
+needs history or undo to be safe. That is why it can come first — see
+*Decisions taken*.
 
 - A config file — **done**:
   `~/.config/limpid/config.toml`, versioned from the first release, edited
   with `toml_edit` so a save keeps the person's comments and touches only the
   keys that changed. Policy (`keep_package_versions`, `keep_journal_days`)
-  flows into the operations the helper is asked for.
-  Settings shows both as steppers, and the problems with the file when it
-  has any.
+  flows into the operations the helper is asked for. Settings shows both as
+  steppers, and the problems with the file when it has any.
 - A managed exclusion list — **done**, enforced by the scanners *and* the
   executor. Exclude acts on the selection in the Overview and the storage
   view, at once and with an undo beside it, since nothing is lost; Settings
   lists the exclusions and takes a typed path. Excluded files stay listed
   in the storage view, marked and without a tick. There is no folder picker
   yet: a portal `FileChooser` would be the way, not a toolkit dialog.
-- History of every run: what was removed, how big, where it went, when
-- Undo for anything that went to the trash
-- Directory selection in the storage view, now that there is an undo
-- Show the exact file list before acting. The confirmation shows only totals
-  today, while the README says you see the exact list.
-- Sanity check on magnitude: refuse to proceed quietly when a plan would
-  remove an implausible share of the disk
-- Render `Guard::boundaries()` in Settings. The safety model is the product's
-  best argument and it is currently invisible.
-
-Of the four fixes listed here when 0.4 was planned, checked against the code
-on 2026-09-29:
-
-- `describe_from_mountinfo` discarding the whole table on one bad line —
-  real, fixed. A `?` inside the loop returned from the function.
-- `remove_coredumps` following symlinks — **was wrong.** `DirEntry::metadata`
-  does not traverse a link, so symlinks were skipped all along. What was
-  wrong was the comment, which said they were removed as links. Corrected,
-  and the behaviour now has a test instead of an assertion.
-- `Breakdown::loose` — real but harmless: accumulated, then always zeroed,
-  so it never affected a number. Removed.
-- `sha256sums=('SKIP')` in the PKGBUILD — real, and it belongs to publishing
-  rather than to 0.4. A tag's source archive has no checksum until the tag
-  exists; the sum is filled in with `updpkgsums` when the AUR package is
-  published.
-
-## 0.5 — Generic findings
-
-None of these need per-application knowledge, so they work on every
-distribution on day one. This is also where the largest measured win lives.
 
 ### Project build artifacts
 
-17 GiB on the reference machine, and none of it visible today. Two rules make
-it safe, and both were established by measurement rather than by reasoning:
+17 GiB on the reference machine, and none of it visible today. Build output
+is regenerated by one command — `cargo build`, `npm install` — so it is
+deleted outright, like a cache (safety rule 4), and the rebuild is its undo.
+Two rules make it safe, and both were established by measurement rather than
+by reasoning:
 
 - **Detect by sibling marker, never by name.** `Cargo.toml` → `target/`,
   `package.json` plus a lockfile → `node_modules/`, `pyproject.toml` →
@@ -128,9 +102,73 @@ it safe, and both were established by measurement rather than by reasoning:
   money; yesterday's is not. Stale for months is `Safe`, recent is not
   offered at all.
 
+Offered per project, with the project's name and how long since it was
+touched, because "which of my projects" is the decision a person is making.
+
 The Go module cache is stored read-only, so a recursive delete fails
 part-way; it needs `go clean -modcache` and is therefore an operation, not a
 path.
+
+**The guard needs its predicate rule first.** No boundary list can name
+every project directory in advance, so this is the first scanner whose paths
+the guard cannot enumerate. It gets a rule — "a directory named `target`
+whose parent holds a `Cargo.toml`" — checked at the moment of removal like
+everything else, not a new boundary. See *One distinction that must not be
+lost*. Settle it before writing the scanner.
+
+Do not size this from the reference machine alone: it is a developer's
+machine, and on one with no projects this finds nothing. The audience the
+project targets first is unusually full of developers, and `npkill`, `kondo`
+and `cargo-sweep` exist because this is common — but none of them sits in a
+general cleaner, and none knows about more than one ecosystem.
+
+### Directories in the storage view, to the trash
+
+Trash only. Trashing a directory on the same filesystem is a rename, so it is
+instant and restored from the file manager like any other; the reversibility
+comes from the trash, not from an undo Limpid would add. Deleting a directory
+*permanently* is the larger blast radius, and that waits for history in 0.5.
+The confirmation says, in those words, that trashed space comes back only
+when the trash is emptied.
+
+### Before acting, and before releasing
+
+- Show the exact list before acting. The confirmation shows target names and
+  totals, while the README says you see the exact list. For build artifacts
+  the list is the projects.
+- Sanity check on magnitude: refuse to proceed quietly when a plan would
+  remove an implausible share of the disk. It matters from this release,
+  because this is the first one where a single plan can be 17 GB.
+- Watch the password path work once from the installed application. It has
+  run end to end from the CLI — on 2026-09-28 it trimmed four packages from
+  the real pacman cache — but the GUI has only been seen refusing.
+
+### A beta on the AUR
+
+At the end of this release: publish the PKGBUILD, with the checksums filled
+in by `updpkgsums` against the tag. Quietly — the AUR is the audience Limpid
+is built for first, and its users report problems rather than write
+reviews. The loud announcement (r/unixporn, Hacker News) waits until history
+and undo exist and the beta has had real weeks.
+
+## 0.5 — Trust and memory
+
+Deliberately before 0.6. Up to here, everything Limpid removes regenerates
+itself or sits in the trash. From 0.6 it offers photographs and documents,
+and the trust infrastructure has to exist before the first feature that can
+lose something irreplaceable.
+
+- History of every run: what was removed, how big, where it went, when
+- Undo for anything that went to the trash, from inside Limpid
+- Permanent deletion of directories in the storage view, now that there is
+  a record of it
+- Render `Guard::boundaries()` in Settings. The safety model is the product's
+  best argument and it is currently invisible.
+
+## 0.6 — Generic findings
+
+None of these need per-application knowledge, so they work on every
+distribution on day one.
 
 ### Duplicate files
 
@@ -158,7 +196,7 @@ and says nothing about a machine that can.
 - Empty directories
 - Broken symlinks
 
-## 0.6 — Correct accounting
+## 0.7 — Correct accounting
 
 - **Exclusive bytes** — how much a removal would *actually* free. Hardlinks
   are already handled and snapshots are detected, but reflinks between live
@@ -179,10 +217,10 @@ and says nothing about a machine that can.
 - Benchmark against `gdu` in CI. Being slower than a pure analyser is a
   regression, not an acceptable cost of knowing more.
 
-## 0.7 — Reclaim without deleting
+## 0.8 — Reclaim without deleting
 
 Three levers that free space with zero data loss. No cleaner offers any of
-them. Depends on 0.5 for duplicates and on 0.6 to prove the gain.
+them. Depends on 0.6 for duplicates and on 0.7 to prove the gain.
 
 - Reflink dedup (`FIDEDUPERANGE`): duplicates share extents instead of one
   copy being removed. Both files stay, the space comes back. On a
@@ -195,7 +233,7 @@ them. Depends on 0.5 for duplicates and on 0.6 to prove the gain.
   recent", "drop older than D days", never "delete this path". Often the
   difference between freeing 2 GB and 40 GB on a machine with snapper.
 
-## 0.8 — Coverage
+## 0.9 — Coverage
 
 - **A declarative catalog in TOML.** Adding an application costs a Rust PR
   today, so the long tail never arrives. A target becomes data: name, paths,
@@ -215,7 +253,7 @@ them. Depends on 0.5 for duplicates and on 0.6 to prove the gain.
 - Steam and Proton shader caches
 - Docker and Podman with image and layer sizes shown before authorising
 
-## 0.9 — Maintenance and reach
+## 0.10 — Maintenance and reach
 
 The release that decides whether anyone outside Arch ever runs this.
 
@@ -240,7 +278,8 @@ The release that decides whether anyone outside Arch ever runs this.
 Per @CLAUDE.md, these come after Arch is excellent, and the rule holds:
 produce nothing rather than a wrong number. But "after" is not "never" — the
 package-manager category is Arch-only today, which means on Ubuntu Limpid
-misses the thing that matters most.
+misses the thing that matters most. For someone who does not write code,
+this — not build artifacts — is where the largest win is.
 
 - `apt` — `/var/cache/apt/archives`
 - `dnf` — `/var/cache/dnf`
@@ -255,7 +294,8 @@ misses the thing that matters most.
 ### Packaging
 
 Packaging *is* distribution for a Linux tool. A program one click away gets
-orders of magnitude more users than one that has to be built.
+orders of magnitude more users than one that has to be built. The AUR comes
+earlier, at the end of 0.4; this is everything after it.
 
 - **Flathub.** The default store in GNOME Software and KDE Discover across
   Ubuntu, Fedora and Mint. Needs appstream metainfo, screenshots and review.
@@ -269,7 +309,7 @@ orders of magnitude more users than one that has to be built.
 ## 1.0
 
 A promise about stability, not a feature. Everything above is the *feature*
-work, and finishing it produces a 0.9, not a 1.0 — the remaining gap is
+work, and finishing it produces a 0.10, not a 1.0 — the remaining gap is
 evidence, and evidence is not something that can be programmed.
 
 Ship it when:
@@ -282,9 +322,9 @@ Ship it when:
 - A fresh install has been run end to end on Arch, Fedora and Debian, and on
   ext4 as well as btrfs. Everything to date has run on one machine, one
   filesystem, one desktop.
-- **The privileged path has been exercised end to end.** It has been built
-  and its refusals tested; it has never been watched working. That alone
-  blocks 1.0.
+- **The privileged path has been exercised end to end from the application,
+  on each of those installs.** From the CLI it has run for real once; from
+  the GUI it has only been seen refusing.
 - The full checklist in @.claude/responsive-ui.md passes on every view, at
   every band, including a short window
 - The helper has a written security review. The privilege split is the best
@@ -300,17 +340,31 @@ separates BleachBit from the registry cleaners nobody installs.
 
 ## Decisions taken
 
-**0.4 before 0.5.** History and undo ship before duplicates and before
-project artifacts. Both of those touch files a person, not a program, would
-have to recreate, and the first release that can lose something irreplaceable
+**Build artifacts before history and undo** (reordered 2026-09-30). The
+earlier plan put all of history and undo first, on the grounds that the next
+release would touch files a person would have to recreate. Build artifacts
+are not such files: one command rebuilds them. So they do not need that
+infrastructure to be safe, and waiting for it held back the largest single
+gain Limpid can offer — three times what it finds today, on the machine it
+was measured on — behind features that, with no users yet, protected nobody.
+
+**Trust before duplicates.** History and undo still ship before duplicates
+and old files, in a release of their own. Those touch photographs and
+documents, and the first release that can lose something irreplaceable
 should not also be the first release that can explain what it did.
 
-**0.5 before 0.6.** Generic findings ship before exclusive-byte accounting.
-They are independent, they are the features users recognise as "a real
-cleaner", and accounting is long work that should not block visible progress.
-The cost is that 0.5 reports ordinary sizes rather than exclusive ones.
+**A quiet beta before a loud launch.** Publishing to the AUR at the end of
+0.4 buys what no amount of building here can: someone else's machine, and
+their reports. Everything 0.4 removes regenerates or sits in the trash, so a
+beta risks re-downloads, not data. The announcement that reaches thousands
+waits for 0.5, because one data-loss report on r/linux is the end of it.
 
-**The declarative catalog stays in 0.8, before the long tail.** Writing fifty
+**Generic findings before correct accounting.** They are independent, they
+are the features users recognise as "a real cleaner", and accounting is long
+work that should not block visible progress. The cost is that 0.6 reports
+ordinary sizes rather than exclusive ones.
+
+**The declarative catalog stays before the long tail.** Writing fifty
 targets by hand and then migrating them to TOML is work thrown away.
 
 **Duplicate detection stays in scope.** It was briefly cut on the grounds
@@ -338,11 +392,12 @@ There are two allowlists in this project and they are opposites.
 The `caches.rs` allowlist is correct design, not a limitation — plenty of
 applications keep non-regenerable state under `~/.cache`, so "delete
 everything not known to be precious" is the wrong default. The problem is
-only that growing it is expensive, which is what 0.8 fixes.
+only that growing it is expensive, which is what 0.9 fixes.
 
-The `guard.rs` list is the opposite, and 0.3 and 0.5 both need paths it
-cannot enumerate in advance. Two additions, and they are different in kind:
-a **predicate** rule for what the program discovers on its own ("a directory
-named `target` whose parent holds a `Cargo.toml`"), and an **explicit
-choice** category for what the user points at. Getting either wrong once
-contaminates every release after it.
+The `guard.rs` list is the opposite, and it cannot enumerate every path
+Limpid needs. Two additions, and they are different in kind: an **explicit
+choice** category for what the user points at, done in 0.3; and a
+**predicate** rule for what the program discovers on its own ("a directory
+named `target` whose parent holds a `Cargo.toml`"), which 0.4's build
+artifacts need. Getting either wrong once contaminates every release after
+it.
