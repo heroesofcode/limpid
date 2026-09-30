@@ -122,7 +122,10 @@ impl Plan {
                     paths: target.paths.clone(),
                     disposal: Disposal::for_kind(target.kind),
                     requires_idle: target.requires_idle.clone(),
-                    permission: Permission::Catalogued,
+                    // The scanner's, not decided here: what makes build
+                    // output safe to remove is a rule, and only the scanner
+                    // that applied it knows it did.
+                    permission: target.permission,
                     expected: target.size,
                 }),
                 // Needs elevation but nothing knows how to do it. Dropped

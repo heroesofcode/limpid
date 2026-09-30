@@ -39,6 +39,11 @@ The boundary list is **written out by hand**, not derived from what the
 scanners declare. Adding a scanner must not be able to widen it by accident.
 A new place to clean requires a deliberate edit to `Guard::new`.
 
+That is the check for `Permission::Catalogued`. There are two others, and
+which one applies travels with the item from the scanner to the executor —
+no call site chooses. `Chosen` is for a path the user pointed at (rule 11
+covers why it drops the boundary list), and `BuildOutput` is rule 12.
+
 ## 3. No path crosses the privilege boundary
 
 This is the one that keeps the root-side small enough to read in one sitting.
@@ -161,6 +166,44 @@ where the space is.
   a default for that setting, never a refusal to start.
 - Policy values are bounded by the privileged helper's own limits, so the
   config file cannot produce an operation the helper would refuse.
+
+## 11. An explicit choice keeps every rule that is not a guess
+
+`Permission::Chosen`, for the storage view. The boundary list exists to catch
+*the program* being wrong, and a file someone selected on screen is not a
+guess, so that list is dropped — and only that. Absolute, no `..`, no symlink
+anywhere along the path, no protected name, inside the home directory and not
+the home directory itself, never `~/.ssh`, `~/.gnupg`, `~/.password-store`
+or the keyrings.
+
+## 12. Build output is found by a rule, and the rule is asked again
+
+`Permission::BuildOutput`, `Guard::check_build_output`, `crate::project`.
+No boundary list can name every project, so a scanner's path is held to a
+rule instead. Everything rule 11 requires, and:
+
+- **A manifest beside it and the tool's evidence inside it.** `Cargo.toml`
+  beside `target/`, which carries Cargo's `CACHEDIR.TAG` with the standard
+  signature or `.rustc_info.json`. `package.json` and a lockfile beside
+  `node_modules/`, which carries npm's or Yarn's install state. Two signals
+  from two directions: a `target` inside a crate's sources had no manifest
+  beside it and was source code.
+- **Never below a hidden directory.** An application's plugins under
+  `~/.config` came with a `package.json`, a lockfile and a `node_modules`,
+  and were not a project. The scanner does not look there, and the guard
+  refuses it on its own, so a scanner that stopped skipping them would still
+  be stopped.
+- **Never nested in other build output**, and never inside a catalogued
+  boundary — those belong to the catalogue, under its rules.
+
+The rule is asked again at the moment of removal. A `Cargo.toml` deleted
+between the scan and the button, and it is no longer build output. Build
+output is deleted, not trashed (rule 4), and a build running inside it blocks
+the removal (`requires_idle`), as an open browser does.
+
+pnpm is not offered. Its `node_modules` is hardlinks into a store shared by
+every project, so removing one frees almost nothing, and the size measured
+for it would promise the whole thing.
 
 ## Checklist for adding a scanner
 
