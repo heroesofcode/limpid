@@ -19,7 +19,7 @@
 //! ```no_run
 //! let context = limpid_core::catalog::Context::new();
 //! let scan = limpid_core::catalog::scan(&context);
-//! println!("{} reclaimable", scan.reclaimable_unprivileged());
+//! println!("{} ready to reclaim", scan.tally().ready);
 //! ```
 
 #![forbid(unsafe_code)]

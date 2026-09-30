@@ -124,9 +124,14 @@ fn hero<'a>(palette: Palette, metrics: Metrics, scan: &'a Scan) -> Element<'a, M
 }
 
 /// The ring, filled with the share of the find that is ready to go.
+///
+/// Ready means what the default selection takes, and nothing else. A
+/// project being worked on can be twenty gigabytes waiting for a decision,
+/// and counting it here made the ring promise what the Clean button, left
+/// alone, would not do.
 fn gauge<'a>(palette: Palette, metrics: Metrics, scan: &Scan) -> Element<'a, Message> {
     let found = scan.size().on_disk;
-    let ready = scan.reclaimable_unprivileged().on_disk;
+    let ready = scan.tally().ready.on_disk;
     let fraction = if found == 0 {
         0.0
     } else {
@@ -138,29 +143,38 @@ fn gauge<'a>(palette: Palette, metrics: Metrics, scan: &Scan) -> Element<'a, Mes
 
 /// The numbers beside the ring.
 fn facts<'a>(palette: Palette, metrics: Metrics, scan: &'a Scan) -> Element<'a, Message> {
-    let found = scan.size().on_disk;
-    let ready = scan.reclaimable_unprivileged().on_disk;
-    let elevated = found.saturating_sub(ready);
+    let tally = scan.tally();
 
     let mut facts = column![
         text("Ready to reclaim")
             .size(ty::BODY_SMALL)
             .style(style::secondary(palette)),
-        text(human(ready))
+        text(human(tally.ready.on_disk))
             .size(metrics.display())
             .style(style::heading(palette)),
         Space::new().height(Length::Fixed(ty::GAP)),
-        stat(palette, metrics, "Found in total", human(found)),
-        stat(palette, metrics, "Behind elevation", human(elevated)),
         stat(
             palette,
             metrics,
-            "Groups",
-            scan.categories.len().to_string()
+            "Found in total",
+            human(scan.size().on_disk)
         ),
     ]
     .spacing(3)
     .width(Length::Fill);
+
+    // Why the rest is not ready, each reason only when it applies. Together
+    // with the figure above they add up to what was found, so none of it is
+    // left unexplained.
+    for (label, size) in [
+        ("Needs a decision", tally.needs_decision),
+        ("In use", tally.in_use),
+        ("Needs your password", tally.needs_root),
+    ] {
+        if !size.is_zero() {
+            facts = facts.push(stat(palette, metrics, label, human(size.on_disk)));
+        }
+    }
 
     if let Some(capacity) = scan.capacity {
         facts = facts.push(Space::new().height(Length::Fixed(ty::GAP)));
@@ -248,18 +262,43 @@ fn action_bar<'a>(palette: Palette, metrics: Metrics, state: &'a State) -> Eleme
 /// land on, and the wording has to be honest about whether it can be undone.
 fn confirmation<'a>(palette: Palette, metrics: Metrics, state: &'a State) -> Element<'a, Message> {
     let plan = state.plan();
+    let store = state.config();
 
-    let mut lines = column![].spacing(4).width(Length::Fill);
+    let mut lines = column![].spacing(6).width(Length::Fill);
     for item in &plan.items {
-        lines = lines.push(row![
-            text(item.name.clone())
-                .size(ty::BODY_SMALL)
-                .style(style::body(palette))
-                .width(Length::Fill),
-            text(human(item.expected.on_disk))
-                .size(ty::BODY_SMALL)
-                .style(style::secondary(palette)),
-        ]);
+        let mut entry = column![
+            row![
+                text(item.name.clone())
+                    .size(ty::BODY_SMALL)
+                    .style(style::body(palette))
+                    .wrapping(Wrapping::WordOrGlyph)
+                    .width(Length::Fill),
+                text(human(item.expected.on_disk))
+                    .size(ty::BODY_SMALL)
+                    .style(style::secondary(palette)),
+            ]
+            .spacing(ty::GAP_TIGHT)
+        ]
+        .spacing(2)
+        .width(Length::Fill);
+
+        // The exact list: every folder that is emptied and every file that
+        // goes, under the name that was ticked. Not repeated when the name
+        // already is the one path, as it is for a project's build output.
+        for path in &item.paths {
+            let shown = store.display(path);
+            if item.paths.len() == 1 && shown == item.name {
+                continue;
+            }
+            entry = entry.push(
+                text(shown)
+                    .size(ty::CAPTION)
+                    .style(style::secondary(palette))
+                    .wrapping(Wrapping::WordOrGlyph)
+                    .width(Length::Fill),
+            );
+        }
+        lines = lines.push(entry);
     }
     for operation in &plan.operations {
         lines = lines.push(row![
@@ -275,7 +314,8 @@ fn confirmation<'a>(palette: Palette, metrics: Metrics, state: &'a State) -> Ele
 
     let warning: &str = if plan.has_permanent_deletions() {
         "This cannot be undone. Caches are removed outright rather than sent to the \
-         trash, because moving them there would not free any space."
+         trash, because moving them there would not free any space. Each folder \
+         listed is emptied; the folder itself stays."
     } else {
         "Everything here goes to the trash and can be put back."
     };
@@ -285,10 +325,12 @@ fn confirmation<'a>(palette: Palette, metrics: Metrics, state: &'a State) -> Ele
         .style(style::quiet_button(palette))
         .padding([10, 18])
         .on_press(Message::Cancel);
+    let large = state.magnitude();
+    let allowed = large.is_none() || state.checked_large();
     let remove = action("Remove", stacked)
         .style(style::danger_button(palette))
         .padding([10, 22])
-        .on_press(Message::Clean);
+        .on_press_maybe(allowed.then_some(Message::Clean));
 
     // Stacked when narrow, and Cancel stays first either way: the
     // destructive one should never be where the safe one was a moment ago.
@@ -330,6 +372,19 @@ fn confirmation<'a>(palette: Palette, metrics: Metrics, state: &'a State) -> Ele
             .style(style::tinted(palette.orange))
             .width(Length::Fill),
         );
+    }
+
+    // Last before the buttons, so it is between the list and the way to
+    // act on it.
+    if let Some(magnitude) = &large {
+        body = body.push(Space::new().height(Length::Fixed(ty::GAP_TIGHT)));
+        body = body.push(view::large(
+            palette,
+            metrics,
+            magnitude,
+            state.checked_large(),
+            Message::CheckLarge,
+        ));
     }
 
     container(

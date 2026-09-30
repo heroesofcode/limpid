@@ -7,7 +7,7 @@
 #![forbid(unsafe_code)]
 
 use std::io::{self, IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -17,7 +17,7 @@ use limpid_core::config::{self, Store};
 use limpid_core::execute::{Executor, Outcome, Problem};
 use limpid_core::model::{Risk, Scan};
 use limpid_core::paths::{ROOT_OVERRIDE, Roots};
-use limpid_core::plan::{Plan, Selection};
+use limpid_core::plan::{Magnitude, Plan, Selection};
 use limpid_core::privileged::{Report, Request, RunError, Runner};
 use limpid_core::size::human;
 
@@ -78,6 +78,10 @@ enum Command {
         /// Also do the parts that need root, which asks for authentication.
         #[arg(long)]
         include_root: bool,
+        /// Go ahead even though this removes an unusually large share of
+        /// the disk. Look at the list without --apply first.
+        #[arg(long)]
+        accept_large: bool,
     },
     /// Show where the space went, without judging any of it.
     Storage {
@@ -155,6 +159,7 @@ fn main() -> Result<()> {
             apply,
             risk,
             include_root,
+            accept_large,
         } => {
             let scan = catalog::scan(&context);
             let selection = Selection {
@@ -167,6 +172,14 @@ fn main() -> Result<()> {
                     .flat_map(|category| &category.targets)
                     .filter(|target| selection.includes(target)),
             );
+
+            // Before anything is touched, and before the helper is asked:
+            // a refusal after half the plan has run is not a refusal.
+            let magnitude = plan.magnitude(scan.capacity);
+            if apply && let Some(why) = refusal_to_apply(magnitude, accept_large) {
+                eprintln!("limpid: {why}");
+                std::process::exit(2);
+            }
 
             let executor = if apply {
                 Executor::applying(&context.roots)
@@ -189,7 +202,17 @@ fn main() -> Result<()> {
 
             let colour = io::stdout().is_terminal();
             let mut stdout = io::stdout().lock();
-            report_clean(&mut stdout, &plan, &outcome, elevated.as_ref(), colour)
+            report_clean(
+                &mut stdout,
+                &Shown {
+                    plan: &plan,
+                    outcome: &outcome,
+                    elevated: elevated.as_ref(),
+                    magnitude,
+                    home: &context.roots.home,
+                },
+                colour,
+            )
         }
         Command::Storage { path, files } => {
             let root = path.unwrap_or_else(|| context.roots.home.clone());
@@ -362,7 +385,7 @@ fn report(out: &mut impl Write, scan: &Scan, colour: bool) -> io::Result<()> {
     }
 
     let total = scan.size();
-    let unprivileged = scan.reclaimable_unprivileged();
+    let tally = scan.tally();
 
     writeln!(
         out,
@@ -370,12 +393,24 @@ fn report(out: &mut impl Write, scan: &Scan, colour: bool) -> io::Result<()> {
         style.bold("Total found"),
         human(total.on_disk)
     )?;
+    // Ready is always said, even when it is nothing: that is the answer to
+    // the question. The rest only when there is some, and together the four
+    // add up to what was found.
     writeln!(
         out,
         "{}  {}",
-        style.bold("Reclaimable without elevation"),
-        human(unprivileged.on_disk),
+        style.bold("Ready to reclaim"),
+        human(tally.ready.on_disk),
     )?;
+    for (label, size) in [
+        ("Needs a decision", tally.needs_decision),
+        ("In use", tally.in_use),
+        ("Needs root", tally.needs_root),
+    ] {
+        if !size.is_zero() {
+            writeln!(out, "{label}  {}", human(size.on_disk))?;
+        }
+    }
 
     // The apparent/on-disk gap is worth showing only when it is real, which
     // on a compressed filesystem it usually is.
@@ -398,15 +433,35 @@ fn report(out: &mut impl Write, scan: &Scan, colour: bool) -> io::Result<()> {
     Ok(())
 }
 
+/// Why an `--apply` run must not go ahead, if it must not.
+fn refusal_to_apply(magnitude: Option<Magnitude>, accepted: bool) -> Option<String> {
+    let magnitude = magnitude.filter(|_| !accepted)?;
+    Some(format!(
+        "{} Nothing was changed. Run it without --apply to see the list, and add \
+         --accept-large once you have.",
+        magnitude.describe(),
+    ))
+}
+
+/// Everything a clean report says.
+struct Shown<'a> {
+    plan: &'a Plan,
+    outcome: &'a Outcome,
+    elevated: Option<&'a Result<Report, RunError>>,
+    magnitude: Option<Magnitude>,
+    home: &'a Path,
+}
+
 /// Print what a clean did, or would do.
-fn report_clean(
-    out: &mut impl Write,
-    plan: &Plan,
-    outcome: &Outcome,
-    elevated: Option<&Result<Report, RunError>>,
-    colour: bool,
-) -> io::Result<()> {
+fn report_clean(out: &mut impl Write, shown: &Shown, colour: bool) -> io::Result<()> {
     let style = Style { enabled: colour };
+    let Shown {
+        plan,
+        outcome,
+        elevated,
+        magnitude,
+        home,
+    } = *shown;
 
     if plan.is_empty() {
         writeln!(out, "Nothing selected.")?;
@@ -421,6 +476,15 @@ fn report_clean(
             item.name,
             style.dim(item.disposal.describe()),
         )?;
+        // The exact list: every directory emptied and every file removed,
+        // unless the name already is the one path.
+        for path in &item.paths {
+            let shown = config::contract(path, home);
+            if item.paths.len() == 1 && shown == item.name {
+                continue;
+            }
+            writeln!(out, "  {:>9}    {}", "", style.dim(&shown))?;
+        }
     }
 
     for operation in &plan.operations {
@@ -460,6 +524,17 @@ fn report_clean(
             )?;
         }
         None => {}
+    }
+
+    // A dry run is where a large plan should be read, so it says so here
+    // rather than only when --apply refuses.
+    if let Some(magnitude) = magnitude.filter(|_| !outcome.applied) {
+        writeln!(
+            out,
+            "{} {}",
+            style.paint("33", &magnitude.describe()),
+            style.dim("Read the list above; --apply will ask for --accept-large."),
+        )?;
     }
 
     if outcome.applied {
@@ -719,8 +794,19 @@ mod tests {
     }
 
     fn render_clean(plan: &Plan, outcome: &Outcome) -> String {
+        render_clean_with(plan, outcome, None)
+    }
+
+    fn render_clean_with(plan: &Plan, outcome: &Outcome, magnitude: Option<Magnitude>) -> String {
         let mut buffer = Vec::new();
-        report_clean(&mut buffer, plan, outcome, None, false).unwrap();
+        let shown = Shown {
+            plan,
+            outcome,
+            elevated: None,
+            magnitude,
+            home: Path::new("/home/x"),
+        };
+        report_clean(&mut buffer, &shown, false).unwrap();
         String::from_utf8(buffer).unwrap()
     }
 
@@ -769,9 +855,11 @@ mod tests {
     }
 
     #[test]
-    fn the_report_separates_total_from_what_needs_no_elevation() {
+    fn the_report_says_what_is_ready_and_why_the_rest_is_not() {
         let scan = scan_with(vec![
             Target::new("user cache", Kind::Cache, Risk::Safe).measured(Size::new(1024, 1024), 1),
+            Target::new("a project", Kind::BuildArtifact, Risk::Review)
+                .measured(Size::new(2048, 2048), 1),
             Target::new("system cache", Kind::Cache, Risk::Safe)
                 .measured(Size::new(3072, 3072), 1)
                 .requires_root(),
@@ -779,11 +867,77 @@ mod tests {
 
         let output = render(&scan);
 
-        assert!(output.contains("Total found  4.00 KiB"), "{output}");
+        assert!(output.contains("Total found  6.00 KiB"), "{output}");
+        assert!(output.contains("Ready to reclaim  1.00 KiB"), "{output}");
+        assert!(output.contains("Needs a decision  2.00 KiB"), "{output}");
+        assert!(output.contains("Needs root  3.00 KiB"), "{output}");
+        // Nothing is open, so that line is not there to be read.
+        assert!(!output.contains("In use"), "{output}");
+    }
+
+    #[test]
+    fn a_dry_run_lists_every_directory_it_would_empty() {
+        let plan = Plan::from_targets(&[Target::new("Brave — web cache", Kind::Cache, Risk::Safe)
+            .measured(Size::new(100, 100), 1)
+            .path("/home/x/.cache/BraveSoftware/Brave-Browser/Default/Cache")
+            .path("/home/x/.config/BraveSoftware/Brave-Browser/Default/GPUCache")]);
+
+        let output = render_clean(&plan, &Outcome::default());
+
         assert!(
-            output.contains("Reclaimable without elevation  1.00 KiB"),
+            output.contains("~/.cache/BraveSoftware/Brave-Browser/Default/Cache"),
             "{output}"
         );
+        assert!(
+            output.contains("~/.config/BraveSoftware/Brave-Browser/Default/GPUCache"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn a_name_that_already_is_the_path_is_not_repeated() {
+        let plan = Plan::from_targets(&[Target::new(
+            "~/Work/old/target",
+            Kind::BuildArtifact,
+            Risk::Safe,
+        )
+        .measured(Size::new(100, 100), 1)
+        .path("/home/x/Work/old/target")]);
+
+        let output = render_clean(&plan, &Outcome::default());
+
+        assert_eq!(output.matches("~/Work/old/target").count(), 1, "{output}");
+    }
+
+    #[test]
+    fn a_large_plan_is_refused_on_apply_until_it_is_accepted() {
+        let large = Magnitude {
+            expected: Size::new(20 << 30, 20 << 30),
+            share: Some(0.4),
+        };
+
+        let why = refusal_to_apply(Some(large), false).expect("a refusal");
+        assert!(why.contains("40%"), "{why}");
+        assert!(why.contains("--accept-large"), "{why}");
+
+        assert_eq!(refusal_to_apply(Some(large), true), None);
+        assert_eq!(refusal_to_apply(None, false), None);
+    }
+
+    #[test]
+    fn a_dry_run_of_a_large_plan_says_so_before_anyone_applies_it() {
+        let plan = Plan::from_targets(&[Target::new("x", Kind::Cache, Risk::Safe)
+            .measured(Size::new(100, 100), 1)
+            .path("/home/x/.cache/x")]);
+        let large = Magnitude {
+            expected: Size::new(20 << 30, 20 << 30),
+            share: Some(0.4),
+        };
+
+        let output = render_clean_with(&plan, &Outcome::default(), Some(large));
+
+        assert!(output.contains("40% of everything stored"), "{output}");
+        assert!(output.contains("--accept-large"), "{output}");
     }
 
     #[test]

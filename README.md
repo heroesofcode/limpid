@@ -153,8 +153,18 @@ near your home directory.
 An app that deletes files gets one chance to be wrong, so the design gives up
 some capability for it:
 
-- **Dry run is the default.** You see the exact list, with real byte counts,
-  before anything moves.
+- **Dry run is the default.** You see the exact list — every folder that will
+  be emptied and every file that will go — with real byte counts, before
+  anything moves.
+- **"Ready" means ready.** The figure on the Overview is what the default
+  selection would remove, and nothing else. What needs your decision, what is
+  open in another program and what needs your password are counted apart, and
+  the four add up to everything found.
+- **A plan out of proportion is not waved through.** Removing more than a
+  quarter of everything stored on the disk is sometimes right — one project's
+  build output can be that — and it is also what a bug would look like. So it
+  waits until you say you have read the list, and the CLI wants
+  `--accept-large`.
 - **Removal matches what is being removed.** Caches, build output and package
   archives are deleted outright, because sending a cache to the trash would
   move the bytes to another directory on the same filesystem, free nothing,
