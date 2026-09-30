@@ -47,6 +47,7 @@ sidebar at all. There is a test for exactly this:
 | Is there a sidebar? | `metrics.sidebar` | comparing a width yourself |
 | Label and value on one line? | `metrics.two_columns()` | a fixed breakpoint |
 | Buttons share a row? | `metrics.buttons_inline()` | guessing |
+| Does a row of *these* fit? | `metrics.fits(cost)`, cost from `layout::text_width` | a breakpoint measured for other labels |
 | Ring and figures side by side? | `metrics.hero_side_by_side()` | a fixed breakpoint |
 | How many swatches per row? | `metrics.swatches_per_row(w, gap)` | a hardcoded count |
 | Big number type size | `metrics.display()` | `ty::DISPLAY` directly |
@@ -62,6 +63,12 @@ costs**, so it cannot drift out of agreement with the element it governs.
 `height` matters too, not just width. A wide but short window (a tiling
 master/stack split) is a real case: the gauge is clamped against
 `window.height * 0.32` for precisely that reason.
+
+A bar of actions on a selection is `view::selection_bar`, not a new row.
+It prices its own buttons from their labels and picks one of three
+arrangements, so a bar that gains a button — one file ticked on the storage
+page offers two actions a larger selection does not — cannot clip at a
+width where the shorter bar fitted. Both action bars use it; a third should.
 
 ## The Iced trap you will hit
 
@@ -88,6 +95,15 @@ Anything that displays a path or a file name needs
 The two failures look the same on screen and the first one is the more
 common, which makes it easy to fix the ancestor, see no change, and assume
 the fix did not work. Check both.
+
+**A name with something beside it.** A file name followed by a chip is a
+third version of the same problem. With the name `Fill`, the chip keeps its
+width and the name is squeezed — at 240 px, `debuginfod_client/` became a
+column three glyphs wide. With a `.wrap()` row and the name `Fill`, the name
+takes a whole line and the chip always drops below. What works is the name
+at its natural width inside a `.wrap()` row that is itself `Fill`: the chip
+sits beside the name when both fit and moves under it when they do not
+(`named` in `src/view/storage.rs`).
 
 ## Checklist — run this before calling any layout change done
 

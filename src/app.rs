@@ -1,6 +1,6 @@
 //! Application state and the top-level view.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -9,12 +9,14 @@ use iced::{Element, Length, Subscription, Task};
 
 use limpid_core::analyse::{self, Survey};
 use limpid_core::catalog::{self, Context};
-use limpid_core::config::{Exclusions, Store};
+use limpid_core::config::{Config, Exclusions, Store};
 use limpid_core::execute::{Executor, Outcome};
-use limpid_core::model::{Scan, Target};
+use limpid_core::model::{Category, Kind, Scan, Target};
 use limpid_core::paths::Roots;
 use limpid_core::plan::{Disposal, Plan, Selection};
-use limpid_core::privileged::{Report, Request, Runner};
+use limpid_core::privileged::{
+    MAXIMUM_DAYS, MAXIMUM_KEEP, MINIMUM_DAYS, MINIMUM_KEEP, Report, Request, Runner,
+};
 use limpid_core::size::Size;
 use limpid_core::walk::WalkOptions;
 use limpid_theme::{Palette, Source, Theme as LimpidTheme};
@@ -53,7 +55,7 @@ impl Page {
         match self {
             Self::Overview => "What is taking up space, and what is safe to let go of",
             Self::Storage => "Where the space went, with no opinion about whether it should have",
-            Self::Settings => "Where Limpid gets its colours, and what it is",
+            Self::Settings => "What Limpid keeps, what it leaves alone, and how it looks",
         }
     }
 }
@@ -85,6 +87,82 @@ pub struct Cleaned {
     pub elevated: Option<Result<Report, String>>,
 }
 
+/// What was just excluded, kept so the notice can offer to put it back.
+#[derive(Debug, Clone, Default)]
+pub struct Excluded {
+    /// What the person ticked, in their words rather than as paths.
+    pub names: Vec<String>,
+    /// What was added to the exclusions. Only what was actually added, so
+    /// undoing never removes an exclusion that was there before.
+    pub paths: Vec<PathBuf>,
+}
+
+impl Excluded {
+    /// "Brave cache", "Brave cache and Thumbnails", "Brave cache and 2 more".
+    pub fn describe(&self) -> String {
+        match self.names.as_slice() {
+            [] => "Nothing".to_owned(),
+            [one] => one.clone(),
+            [one, two] => format!("{one} and {two}"),
+            [one, rest @ ..] => format!("{one} and {} more", rest.len()),
+        }
+    }
+}
+
+/// A setting on the settings page that is changed a step at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Setting {
+    /// Versions of each package the pacman cache keeps.
+    PackageVersions,
+    /// Days of system journal kept.
+    JournalDays,
+}
+
+/// Which way to move a [`Setting`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Direction {
+    /// Keep less.
+    Less,
+    /// Keep more.
+    More,
+}
+
+/// The journal windows the stepper moves between.
+///
+/// Steps rather than single days: a ten-year range one day at a time is a
+/// setting nobody would reach. A value typed into the file between two of
+/// these is kept as written, and the next press moves to the neighbour.
+pub const JOURNAL_STEPS: [u16; 7] = [7, 14, 30, 60, 90, 180, 365];
+
+impl Setting {
+    /// The value this setting would take one step from `config`, or `None`
+    /// at the end of the range.
+    pub fn step(self, config: &Config, direction: Direction) -> Option<Config> {
+        let mut next = config.clone();
+        match self {
+            Self::PackageVersions => {
+                let now = config.policy.keep_package_versions;
+                next.policy.keep_package_versions = match direction {
+                    Direction::Less if now > MINIMUM_KEEP => now - 1,
+                    Direction::More if now < MAXIMUM_KEEP => now + 1,
+                    _ => return None,
+                };
+            }
+            Self::JournalDays => {
+                let now = config.policy.keep_journal_days;
+                let step = match direction {
+                    Direction::Less => JOURNAL_STEPS.iter().rev().find(|&&days| days < now),
+                    Direction::More => JOURNAL_STEPS.iter().find(|&&days| days > now),
+                };
+                next.policy.keep_journal_days = step
+                    .copied()
+                    .filter(|days| (MINIMUM_DAYS..=MAXIMUM_DAYS).contains(days))?;
+            }
+        }
+        Some(next)
+    }
+}
+
 /// How many of the largest files to list per level.
 const LARGEST_FILES: usize = 8;
 
@@ -111,6 +189,8 @@ pub struct Storage {
     pub removing: bool,
     /// What the last removal from this page did.
     pub outcome: Option<Outcome>,
+    /// What was just excluded from this page.
+    pub excluded: Option<Excluded>,
     /// Which walk the result on screen belongs to.
     ///
     /// Walks take seconds and finish out of order, so a slow one started
@@ -178,6 +258,24 @@ pub struct State {
     outcome: Option<Cleaned>,
     /// The storage page.
     storage: Storage,
+    /// Where to look. Fixed at start-up, so every part of the window agrees
+    /// about which home directory and which config file it means.
+    roots: Roots,
+    /// The config file, as last read or written.
+    config: Store,
+    /// Why the last change to the config file did not stick.
+    config_error: Option<String>,
+    /// What was just excluded from the overview.
+    excluded: Option<Excluded>,
+    /// The path being typed on the settings page.
+    draft: String,
+    /// Which scan the next result must belong to.
+    ///
+    /// Changing an exclusion rescans in the background, and two changes in
+    /// quick succession start two scans that can finish in either order.
+    /// Without this the older one could land last and put back something
+    /// that has since been excluded.
+    scans: u64,
 }
 
 /// Everything that can happen.
@@ -187,8 +285,8 @@ pub enum Message {
     Navigate(Page),
     /// The scan button was pressed.
     StartScan,
-    /// The scan finished.
-    ScanFinished(Box<Scan>),
+    /// A scan finished. Dropped unless it is the latest one started.
+    ScanFinished(u64, Box<Scan>),
     /// The desktop theme changed underneath us.
     PaletteChanged(Box<Palette>),
     /// A finding was ticked or unticked.
@@ -233,6 +331,18 @@ pub enum Message {
     Reveal(PathBuf),
     /// Put a file's path on the clipboard.
     CopyPath(PathBuf),
+    /// Never offer the ticked findings again.
+    ExcludeSelected,
+    /// Never offer or remove the ticked files on the storage page.
+    ExcludeFiles,
+    /// Take these back out of the exclusions.
+    Include(Vec<PathBuf>),
+    /// The path being typed on the settings page changed.
+    DraftChanged(String),
+    /// Exclude the path typed on the settings page.
+    AddDraft,
+    /// Move a setting one step.
+    Adjust(Setting, Direction),
 }
 
 impl State {
@@ -241,6 +351,12 @@ impl State {
     /// Scanning immediately is the right default: the question the user
     /// opened the window to ask is always the same one.
     pub fn boot() -> (Self, Task<Message>) {
+        Self::boot_in(Roots::from_env())
+    }
+
+    /// Start up looking at these roots. The tests use this, so that nothing
+    /// they do can read or write the developer's own config file.
+    fn boot_in(roots: Roots) -> (Self, Task<Message>) {
         let state = Self {
             theme: LimpidTheme::detect(),
             page: Page::Overview,
@@ -250,6 +366,12 @@ impl State {
             cleaning: false,
             outcome: None,
             storage: Storage::default(),
+            config: Store::open(&roots),
+            roots,
+            config_error: None,
+            excluded: None,
+            draft: String::new(),
+            scans: 0,
         };
         (state, Task::done(Message::StartScan))
     }
@@ -257,6 +379,11 @@ impl State {
     /// The colours in force.
     pub fn palette(&self) -> Palette {
         self.theme.palette
+    }
+
+    /// The colours in force, and where they came from.
+    pub fn theme(&self) -> &LimpidTheme {
+        &self.theme
     }
 
     /// Where the colours came from.
@@ -287,6 +414,26 @@ impl State {
     /// The storage page's state.
     pub fn storage(&self) -> &Storage {
         &self.storage
+    }
+
+    /// The config file, as last read or written.
+    pub fn config(&self) -> &Store {
+        &self.config
+    }
+
+    /// Why the last change to the config file did not stick.
+    pub fn config_error(&self) -> Option<&str> {
+        self.config_error.as_deref()
+    }
+
+    /// What was just excluded from the overview.
+    pub fn excluded(&self) -> Option<&Excluded> {
+        self.excluded.as_ref()
+    }
+
+    /// The path being typed on the settings page.
+    pub fn draft(&self) -> &str {
+        &self.draft
     }
 
     /// How the scan is going.
@@ -329,11 +476,12 @@ impl State {
         self.storage.confirming_delete = false;
         self.storage.removing = true;
         self.storage.outcome = None;
+        self.storage.excluded = None;
+        let roots = self.roots.clone();
 
         Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
-                    let roots = Roots::from_env();
                     Executor::applying(&roots)
                         .with_exclusions(exclusions(&roots))
                         .run(&plan)
@@ -385,11 +533,22 @@ impl State {
         match message {
             Message::Navigate(page) => {
                 self.page = page;
+                // Notices belong to the page they were raised on and the
+                // moment they were raised; carried to another page they
+                // would describe something no longer on screen.
+                self.excluded = None;
+                self.storage.excluded = None;
+                self.config_error = None;
+                // Read again, so an edit made by hand while the window was
+                // open is what the page shows.
+                if page == Page::Settings {
+                    self.config = Store::open(&self.roots);
+                }
                 // Measuring a whole home directory takes seconds, so it
                 // happens when the page is first opened rather than at start
                 // up, and only once.
                 if page == Page::Storage && self.storage.trail.is_empty() {
-                    return Task::done(Message::Explore(Roots::from_env().home));
+                    return Task::done(Message::Explore(self.roots.home.clone()));
                 }
                 Task::none()
             }
@@ -402,15 +561,17 @@ impl State {
                     self.storage.selected.clear();
                 }
                 self.storage.confirming_delete = false;
+                self.storage.excluded = None;
                 self.storage.working = true;
                 self.storage.survey = None;
                 self.storage.generation += 1;
                 let generation = self.storage.generation;
+                let roots = self.roots.clone();
                 Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
                             let options = WalkOptions {
-                                skip: exclusions(&Roots::from_env()),
+                                skip: exclusions(&roots),
                                 ..WalkOptions::default()
                             };
                             analyse::survey(&path, LARGEST_FILES, &options).unwrap_or_default()
@@ -508,21 +669,27 @@ impl State {
                     return Task::none();
                 }
                 self.progress = Progress::Running;
-                // The walk is IO-bound and long enough to be felt, so it goes
-                // to a blocking thread rather than stalling the frame loop.
-                Task::perform(
-                    async {
-                        tokio::task::spawn_blocking(|| catalog::scan(&Context::new()))
-                            .await
-                            .unwrap_or_default()
-                    },
-                    |scan| Message::ScanFinished(Box::new(scan)),
-                )
+                self.excluded = None;
+                self.start_scan()
             }
-            Message::ScanFinished(scan) => {
-                self.progress = Progress::Done(scan);
+            Message::ScanFinished(generation, scan) => {
+                if generation != self.scans {
+                    return Task::none();
+                }
                 self.cleaning = false;
-                self.select_safe();
+                // A rescan behind a scan already on screen keeps the ticks;
+                // a scan the person asked for starts from the safe set, as
+                // the first one did.
+                match &self.progress {
+                    Progress::Done(old) => {
+                        self.selected = carry(&self.selected, old, &scan);
+                        self.progress = Progress::Done(scan);
+                    }
+                    _ => {
+                        self.progress = Progress::Done(scan);
+                        self.select_safe();
+                    }
+                }
                 Task::none()
             }
             Message::Toggle(id) => {
@@ -557,10 +724,11 @@ impl State {
                 self.confirming = false;
                 self.cleaning = true;
                 self.outcome = None;
+                self.excluded = None;
+                let roots = self.roots.clone();
                 Task::perform(
                     async move {
                         tokio::task::spawn_blocking(move || {
-                            let roots = Roots::from_env();
                             let outcome = Executor::applying(&roots)
                                 .with_exclusions(exclusions(&roots))
                                 .run(&plan);
@@ -595,7 +763,233 @@ impl State {
                 self.theme.palette = *palette;
                 Task::none()
             }
+            Message::ExcludeSelected => {
+                let chosen: Vec<(String, Vec<PathBuf>)> = self
+                    .chosen()
+                    .into_iter()
+                    .map(|target| (target.name.clone(), target.paths.clone()))
+                    .collect();
+                let (names, paths): (Vec<_>, Vec<_>) = chosen.into_iter().unzip();
+                let (added, task) = self.exclude(paths.into_iter().flatten().collect());
+                self.excluded = (!added.is_empty()).then_some(Excluded {
+                    names,
+                    paths: added,
+                });
+                task
+            }
+            Message::ExcludeFiles => {
+                let paths: Vec<PathBuf> = self
+                    .storage
+                    .chosen()
+                    .into_iter()
+                    .map(|(path, _)| path)
+                    .collect();
+                let names = paths
+                    .iter()
+                    .map(|path| {
+                        path.file_name()
+                            .map(|name| name.to_string_lossy().into_owned())
+                            .unwrap_or_else(|| path.display().to_string())
+                    })
+                    .collect();
+                let (added, task) = self.exclude(paths);
+                self.storage.excluded = (!added.is_empty()).then_some(Excluded {
+                    names,
+                    paths: added,
+                });
+                task
+            }
+            Message::Include(paths) => {
+                let changed = self.change_config(|config| {
+                    // Not short-circuiting: every one of them has to go.
+                    paths
+                        .iter()
+                        .fold(false, |any, path| config.exclusions.remove(path) | any)
+                });
+                // The offer to undo has been answered, whichever page it
+                // was made on.
+                let answered = |notice: &Option<Excluded>| {
+                    notice
+                        .as_ref()
+                        .is_some_and(|notice| notice.paths.iter().any(|p| paths.contains(p)))
+                };
+                if answered(&self.excluded) {
+                    self.excluded = None;
+                }
+                if answered(&self.storage.excluded) {
+                    self.storage.excluded = None;
+                }
+                if changed {
+                    self.exclusions_changed()
+                } else {
+                    Task::none()
+                }
+            }
+            Message::DraftChanged(draft) => {
+                self.draft = draft;
+                Task::none()
+            }
+            Message::AddDraft => {
+                let typed = self.draft.trim().to_owned();
+                if typed.is_empty() {
+                    return Task::none();
+                }
+                let Some(path) = self.config.expand(&typed) else {
+                    self.config_error = Some(format!(
+                        "\u{201c}{typed}\u{201d} is not a full path. Start it with / or ~/, \
+                         so it means the same thing wherever Limpid is started from."
+                    ));
+                    return Task::none();
+                };
+                if self.config.config.exclusions.covers(&path) {
+                    self.config_error = Some(format!(
+                        "{} is already excluded.",
+                        self.config.display(&path)
+                    ));
+                    return Task::none();
+                }
+                let (added, task) = self.exclude(vec![path]);
+                if !added.is_empty() {
+                    self.draft.clear();
+                }
+                task
+            }
+            Message::Adjust(setting, direction) => {
+                let changed = self.change_config(|config| match setting.step(config, direction) {
+                    Some(next) => {
+                        *config = next;
+                        true
+                    }
+                    None => false,
+                });
+                // The figures do not change, but what the overview says it
+                // will do does: "keeps the newest 3" has to become 2.
+                if changed { self.rescan() } else { Task::none() }
+            }
         }
+    }
+
+    /// Start a scan, tagged so that only the latest one lands.
+    ///
+    /// The walk is IO-bound and long enough to be felt, so it goes to a
+    /// blocking thread rather than stalling the frame loop.
+    fn start_scan(&mut self) -> Task<Message> {
+        self.scans += 1;
+        let generation = self.scans;
+        let roots = self.roots.clone();
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    let config = Store::open(&roots).config;
+                    catalog::scan(&Context::with_config(roots, config))
+                })
+                .await
+                .unwrap_or_default()
+            },
+            move |scan| Message::ScanFinished(generation, Box::new(scan)),
+        )
+    }
+
+    /// Scan again behind what is on screen, keeping the ticks.
+    ///
+    /// Behind rather than instead of: the results stay up while the new ones
+    /// are measured, so an exclusion does not blank the page. Nothing to do
+    /// before the first scan, which will read the new settings anyway.
+    fn rescan(&mut self) -> Task<Message> {
+        match self.progress {
+            Progress::Idle => Task::none(),
+            // Superseded rather than left to finish: it read the settings
+            // before they changed.
+            Progress::Running | Progress::Done(_) => self.start_scan(),
+        }
+    }
+
+    /// Read the file as it is now, change it, and write it back.
+    ///
+    /// Read fresh rather than from the copy held since start-up, so an edit
+    /// made by hand while the window is open is built on rather than
+    /// overwritten. Returns whether anything was saved.
+    fn change_config(&mut self, change: impl FnOnce(&mut Config) -> bool) -> bool {
+        let mut store = Store::open(&self.roots);
+        if !change(&mut store.config) {
+            self.config = store;
+            return false;
+        }
+        match store.save() {
+            Ok(()) => {
+                self.config = store;
+                self.config_error = None;
+                true
+            }
+            Err(error) => {
+                // What is on disk, not what failed to get there: showing the
+                // change as made would be showing a setting nothing honours.
+                self.config = Store::open(&self.roots);
+                self.config_error = Some(format!("The change was not saved: {error}"));
+                false
+            }
+        }
+    }
+
+    /// Add these to the exclusions, and bring what is on screen into line.
+    ///
+    /// Returns what was actually added. A path already covered adds
+    /// nothing, and undoing must not take away an exclusion that was there
+    /// before.
+    fn exclude(&mut self, paths: Vec<PathBuf>) -> (Vec<PathBuf>, Task<Message>) {
+        let mut added = Vec::new();
+        let saved = self.change_config(|config| {
+            for path in paths {
+                if !config.exclusions.covers(&path) && config.exclusions.add(path.clone()) {
+                    added.push(path);
+                }
+            }
+            !added.is_empty()
+        });
+        if !saved {
+            return (Vec::new(), Task::none());
+        }
+        (added, self.exclusions_changed())
+    }
+
+    /// Make everything on screen agree with the exclusions as they now are.
+    fn exclusions_changed(&mut self) -> Task<Message> {
+        let exclusions = self.config.config.exclusions.clone();
+
+        // The storage page is corrected in place. Its lists stay as they
+        // were measured, with what is now excluded marked and unticked, so
+        // an undo puts things back exactly; the next walk leaves excluded
+        // files out of the largest list.
+        self.storage
+            .selected
+            .retain(|path| !exclusions.covers(path));
+        if self.storage.plan(Disposal::Delete).is_empty() {
+            self.storage.confirming_delete = false;
+        }
+
+        // Unticked now rather than when the rescan lands: in between, the
+        // action bar would count what was just excluded and Clean would ask
+        // about it. A finding only partly excluded keeps its tick; the
+        // rescan will say how much of it is left.
+        if let Some(scan) = self.scan() {
+            let excluded = |&(c, t): &TargetId| {
+                scan.categories
+                    .get(c)
+                    .and_then(|category| category.targets.get(t))
+                    .is_some_and(|target| {
+                        !target.paths.is_empty()
+                            && target.paths.iter().all(|path| exclusions.covers(path))
+                    })
+            };
+            let kept = self.selected.iter().filter(|id| !excluded(id)).copied();
+            self.selected = kept.collect();
+        }
+
+        // A confirmation listing what is about to be removed must not
+        // change while it is being read.
+        self.confirming = false;
+
+        self.rescan()
     }
 
     /// Draw the window.
@@ -613,8 +1007,8 @@ impl State {
 
             let body = match self.page {
                 Page::Overview => view::overview::view(palette, metrics, self),
-                Page::Storage => view::storage::view(palette, metrics, self.storage()),
-                Page::Settings => view::settings::view(palette, metrics, &self.theme),
+                Page::Storage => view::storage::view(palette, metrics, self),
+                Page::Settings => view::settings::view(palette, metrics, self),
             };
 
             let header = column![
@@ -745,6 +1139,66 @@ pub fn placeholder<'a>(
     .into()
 }
 
+/// The ticks on one scan, moved onto the next.
+///
+/// Matched by category and target name, and only where that pair names
+/// exactly one target in both scans: a tick that could belong to either of
+/// two rows lands on neither. Indices cannot be carried, because excluding
+/// one finding moves every one after it.
+fn carry(selected: &BTreeSet<TargetId>, old: &Scan, new: &Scan) -> BTreeSet<TargetId> {
+    fn index(scan: &Scan) -> BTreeMap<(&str, &str), Vec<TargetId>> {
+        let mut index: BTreeMap<_, Vec<_>> = BTreeMap::new();
+        for (c, category) in scan.categories.iter().enumerate() {
+            for (t, target) in category.targets.iter().enumerate() {
+                index
+                    .entry((category.name.as_str(), target.name.as_str()))
+                    .or_default()
+                    .push((c, t));
+            }
+        }
+        index
+    }
+
+    let key = |scan: &'_ Scan, (c, t): TargetId| -> Option<(String, String)> {
+        let category: &Category = scan.categories.get(c)?;
+        Some((category.name.clone(), category.targets.get(t)?.name.clone()))
+    };
+
+    let before = index(old);
+    let after = index(new);
+
+    selected
+        .iter()
+        .filter_map(|&id| key(old, id))
+        .filter(|(c, t)| {
+            before
+                .get(&(c.as_str(), t.as_str()))
+                .is_some_and(|ids| ids.len() == 1)
+        })
+        .filter_map(
+            |(c, t)| match after.get(&(c.as_str(), t.as_str()))?.as_slice() {
+                [id] => Some(*id),
+                _ => None,
+            },
+        )
+        // What can no longer be ticked — now in use, or now empty — loses
+        // its tick rather than carrying one the view would not draw.
+        .filter(|&(c, t)| selectable(&new.categories[c].targets[t]))
+        .collect()
+}
+
+/// Whether a finding can be ticked.
+///
+/// A privileged target is selectable when the helper knows an operation for
+/// it; one that needs root and names no operation cannot be cleaned by
+/// anything, so offering a tick would be a lie.
+pub fn selectable(target: &Target) -> bool {
+    !target.size.is_zero()
+        && target.blocked.is_none()
+        && target.kind != Kind::Attention
+        && (target.is_actionable() || target.privileged.is_some())
+}
+
 /// What the person asked never to be offered or removed, read from the file
 /// as it is now.
 ///
@@ -759,6 +1213,15 @@ fn exclusions(roots: &Roots) -> Exclusions {
 mod tests {
     use super::*;
 
+    /// A window pointed at an empty fixture, so nothing a test does can
+    /// read or write the developer's own config file. The directory lives
+    /// as long as the returned guard.
+    fn boot() -> (State, tempfile::TempDir) {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let (state, _) = State::boot_in(Roots::under(dir.path()));
+        (state, dir)
+    }
+
     #[test]
     fn every_page_has_a_title_and_a_subtitle() {
         for page in Page::ALL {
@@ -769,7 +1232,7 @@ mod tests {
 
     #[test]
     fn navigating_changes_the_page_without_disturbing_the_scan() {
-        let (mut state, _) = State::boot();
+        let (mut state, _dir) = boot();
         state.progress = Progress::Running;
 
         let _ = state.update(Message::Navigate(Page::Settings));
@@ -780,7 +1243,7 @@ mod tests {
 
     #[test]
     fn a_second_scan_request_while_one_is_running_is_ignored() {
-        let (mut state, _) = State::boot();
+        let (mut state, _dir) = boot();
         state.progress = Progress::Running;
 
         let task = state.update(Message::StartScan);
@@ -793,7 +1256,7 @@ mod tests {
 
     #[test]
     fn a_theme_change_repaints_with_the_new_palette() {
-        let (mut state, _) = State::boot();
+        let (mut state, _dir) = boot();
         let light = Palette::light();
 
         let _ = state.update(Message::PaletteChanged(Box::new(light)));
@@ -828,15 +1291,15 @@ mod tests {
         }
     }
 
-    fn state_with_scan() -> State {
-        let (mut state, _) = State::boot();
-        let _ = state.update(Message::ScanFinished(Box::new(sample_scan())));
-        state
+    fn state_with_scan() -> (State, tempfile::TempDir) {
+        let (mut state, dir) = boot();
+        let _ = state.update(Message::ScanFinished(state.scans, Box::new(sample_scan())));
+        (state, dir)
     }
 
     #[test]
     fn a_scan_arrives_with_only_the_uncontroversial_items_ticked() {
-        let state = state_with_scan();
+        let (state, _dir) = state_with_scan();
 
         assert!(state.is_selected((0, 0)), "the safe one should be ticked");
         assert!(!state.is_selected((0, 1)), "review needs a decision");
@@ -847,7 +1310,7 @@ mod tests {
 
     #[test]
     fn ticking_is_a_toggle() {
-        let mut state = state_with_scan();
+        let (mut state, _dir) = state_with_scan();
 
         let _ = state.update(Message::Toggle((0, 1)));
         assert!(state.is_selected((0, 1)));
@@ -858,7 +1321,7 @@ mod tests {
 
     #[test]
     fn the_plan_follows_the_selection() {
-        let mut state = state_with_scan();
+        let (mut state, _dir) = state_with_scan();
         assert_eq!(state.plan().items.len(), 1);
 
         let _ = state.update(Message::Toggle((0, 1)));
@@ -871,7 +1334,7 @@ mod tests {
 
     #[test]
     fn a_selection_that_would_do_nothing_does_not_raise_a_confirmation() {
-        let mut state = state_with_scan();
+        let (mut state, _dir) = state_with_scan();
         let _ = state.update(Message::SelectNone);
 
         let _ = state.update(Message::AskToClean);
@@ -881,7 +1344,7 @@ mod tests {
 
     #[test]
     fn confirming_can_be_backed_out_of() {
-        let mut state = state_with_scan();
+        let (mut state, _dir) = state_with_scan();
 
         let _ = state.update(Message::AskToClean);
         assert!(state.is_confirming());
@@ -893,7 +1356,7 @@ mod tests {
 
     #[test]
     fn accepting_the_confirmation_closes_it_and_starts_work() {
-        let mut state = state_with_scan();
+        let (mut state, _dir) = state_with_scan();
         let _ = state.update(Message::AskToClean);
 
         let task = state.update(Message::Clean);
@@ -905,7 +1368,7 @@ mod tests {
 
     #[test]
     fn accepting_with_nothing_chosen_starts_nothing() {
-        let mut state = state_with_scan();
+        let (mut state, _dir) = state_with_scan();
         let _ = state.update(Message::SelectNone);
 
         let task = state.update(Message::Clean);
@@ -916,7 +1379,7 @@ mod tests {
 
     #[test]
     fn selecting_safe_again_restores_the_starting_point() {
-        let mut state = state_with_scan();
+        let (mut state, _dir) = state_with_scan();
         let _ = state.update(Message::Toggle((0, 1)));
         let _ = state.update(Message::Toggle((0, 0)));
 
@@ -943,8 +1406,8 @@ mod tests {
             ..Scan::default()
         };
 
-        let (mut state, _) = State::boot();
-        let _ = state.update(Message::ScanFinished(Box::new(scan)));
+        let (mut state, _dir) = boot();
+        let _ = state.update(Message::ScanFinished(state.scans, Box::new(scan)));
 
         // Not ticked by default: it costs a password prompt.
         assert!(!state.is_selected((0, 0)));
@@ -964,19 +1427,19 @@ mod tests {
 
     #[test]
     fn a_finished_clean_is_reported_and_triggers_a_fresh_measurement() {
-        let mut state = state_with_scan();
+        let (mut state, _dir) = state_with_scan();
 
         let _ = state.update(Message::Cleaned(Box::default()));
 
         assert!(state.outcome().is_some());
         // The figure shown afterwards is measured again rather than assumed.
-        let _ = state.update(Message::ScanFinished(Box::new(sample_scan())));
+        let _ = state.update(Message::ScanFinished(state.scans, Box::new(sample_scan())));
         assert!(!state.is_cleaning());
     }
 
     #[test]
     fn opening_the_storage_page_starts_a_measurement_once() {
-        let (mut state, _) = State::boot();
+        let (mut state, _dir) = boot();
 
         let first = state.update(Message::Navigate(Page::Storage));
         assert_eq!(state.page, Page::Storage);
@@ -1001,7 +1464,7 @@ mod tests {
         use limpid_core::analyse::{Breakdown, Entry, Survey};
         use limpid_core::size::Size;
 
-        let (mut state, _) = State::boot();
+        let (mut state, _dir) = boot();
         let _ = state.update(Message::Explore(PathBuf::from("/tmp")));
         let generation = state.storage().generation;
         let _ = state.update(Message::Explored(
@@ -1049,20 +1512,20 @@ mod tests {
         }
     }
 
-    fn state_on_storage() -> State {
-        let (mut state, _) = State::boot();
+    fn state_on_storage() -> (State, tempfile::TempDir) {
+        let (mut state, dir) = boot();
         let _ = state.update(Message::Explore(PathBuf::from("/home/x")));
         let generation = state.storage().generation;
         let _ = state.update(Message::Explored(
             generation,
             Box::new(survey_with_a_file()),
         ));
-        state
+        (state, dir)
     }
 
     #[test]
     fn ticking_a_file_on_the_storage_page_is_a_toggle() {
-        let mut state = state_on_storage();
+        let (mut state, _dir) = state_on_storage();
         let file = PathBuf::from("/home/x/big.iso");
 
         let _ = state.update(Message::ToggleFile(file.clone()));
@@ -1076,7 +1539,7 @@ mod tests {
     fn a_selection_becomes_a_chosen_plan_that_goes_to_the_trash() {
         use limpid_core::guard::Permission;
 
-        let mut state = state_on_storage();
+        let (mut state, _dir) = state_on_storage();
         let _ = state.update(Message::ToggleFile(PathBuf::from("/home/x/big.iso")));
 
         let plan = state.storage().plan(Disposal::Trash);
@@ -1091,7 +1554,7 @@ mod tests {
 
     #[test]
     fn a_selection_cannot_name_a_file_the_user_has_navigated_away_from() {
-        let mut state = state_on_storage();
+        let (mut state, _dir) = state_on_storage();
         let _ = state.update(Message::ToggleFile(PathBuf::from("/home/x/big.iso")));
         assert!(!state.storage().plan(Disposal::Trash).is_empty());
 
@@ -1103,7 +1566,7 @@ mod tests {
 
     #[test]
     fn a_selection_that_would_delete_nothing_raises_no_confirmation() {
-        let mut state = state_on_storage();
+        let (mut state, _dir) = state_on_storage();
 
         let _ = state.update(Message::AskToDelete);
 
@@ -1112,7 +1575,7 @@ mod tests {
 
     #[test]
     fn the_permanent_deletion_confirmation_can_be_backed_out_of() {
-        let mut state = state_on_storage();
+        let (mut state, _dir) = state_on_storage();
         let _ = state.update(Message::ToggleFile(PathBuf::from("/home/x/big.iso")));
 
         let _ = state.update(Message::AskToDelete);
@@ -1125,7 +1588,7 @@ mod tests {
 
     #[test]
     fn trashing_acts_directly_because_it_is_reversible() {
-        let mut state = state_on_storage();
+        let (mut state, _dir) = state_on_storage();
         let _ = state.update(Message::ToggleFile(PathBuf::from("/home/x/big.iso")));
 
         let task = state.update(Message::TrashSelected);
@@ -1137,7 +1600,7 @@ mod tests {
 
     #[test]
     fn a_finished_removal_clears_the_selection_and_measures_again() {
-        let mut state = state_on_storage();
+        let (mut state, _dir) = state_on_storage();
         let _ = state.update(Message::ToggleFile(PathBuf::from("/home/x/big.iso")));
         let _ = state.update(Message::TrashSelected);
 
@@ -1152,7 +1615,7 @@ mod tests {
     #[test]
     fn a_directory_is_never_part_of_a_selection_plan() {
         // Directories have no checkbox, and nothing else may put one in.
-        let mut state = state_on_storage();
+        let (mut state, _dir) = state_on_storage();
         let _ = state.update(Message::ToggleFile(PathBuf::from("/home/x/Videos")));
 
         assert!(state.storage().plan(Disposal::Trash).is_empty());
@@ -1177,7 +1640,7 @@ mod tests {
             largest: Vec::new(),
         };
 
-        let (mut state, _) = State::boot();
+        let (mut state, _dir) = boot();
         let _ = state.update(Message::Explore(PathBuf::from("/a")));
         let slow = state.storage().generation;
         let _ = state.update(Message::Explore(PathBuf::from("/a/b")));
@@ -1197,7 +1660,7 @@ mod tests {
 
     #[test]
     fn a_breadcrumb_click_trims_the_trail_back_to_that_depth() {
-        let (mut state, _) = State::boot();
+        let (mut state, _dir) = boot();
         for path in ["/a", "/a/b", "/a/b/c"] {
             let _ = state.update(Message::Explore(PathBuf::from(path)));
         }
@@ -1210,7 +1673,7 @@ mod tests {
 
     #[test]
     fn clicking_the_breadcrumb_you_are_already_on_does_nothing() {
-        let (mut state, _) = State::boot();
+        let (mut state, _dir) = boot();
         let _ = state.update(Message::Explore(PathBuf::from("/a")));
 
         let _ = state.update(Message::Ascend(0));
@@ -1220,10 +1683,313 @@ mod tests {
 
     #[test]
     fn a_finished_scan_is_kept() {
-        let (mut state, _) = State::boot();
+        let (mut state, _dir) = boot();
 
-        let _ = state.update(Message::ScanFinished(Box::default()));
+        let _ = state.update(Message::ScanFinished(state.scans, Box::default()));
 
         assert!(matches!(state.progress, Progress::Done(_)));
+    }
+
+    /// A scan whose findings have real paths inside the fixture.
+    fn scan_with_paths(roots: &Roots) -> Scan {
+        use limpid_core::model::{Category, Kind, Risk};
+        use limpid_core::size::Size;
+
+        let at = |name: &str, path: &str| {
+            Target::new(name, Kind::Cache, Risk::Safe)
+                .path(roots.home.join(path))
+                .measured(Size::new(100, 100), 1)
+        };
+
+        let mut category = Category::new("Caches", "");
+        category.targets = vec![
+            at("Thumbnails", ".cache/thumbnails"),
+            at("Fonts", ".cache/fontconfig"),
+            at("Pip", ".cache/pip"),
+        ];
+
+        Scan {
+            categories: vec![category],
+            ..Scan::default()
+        }
+    }
+
+    fn on_disk(roots: &Roots) -> Store {
+        Store::open(roots)
+    }
+
+    #[test]
+    fn excluding_the_ticked_findings_writes_them_to_the_file_and_offers_an_undo() {
+        let (mut state, _dir) = boot();
+        let roots = state.roots.clone();
+        let _ = state.update(Message::ScanFinished(
+            state.scans,
+            Box::new(scan_with_paths(&roots)),
+        ));
+        let _ = state.update(Message::SelectNone);
+        let _ = state.update(Message::Toggle((0, 0)));
+
+        let _ = state.update(Message::ExcludeSelected);
+
+        let thumbnails = roots.home.join(".cache/thumbnails");
+        assert!(on_disk(&roots).config.exclusions.covers(&thumbnails));
+        let excluded = state.excluded().expect("a notice");
+        assert_eq!(excluded.names, ["Thumbnails"]);
+        assert_eq!(excluded.paths, [thumbnails]);
+        // Unticked at once, not when the rescan lands: in between, the bar
+        // would count it and Clean would ask about it.
+        assert!(!state.is_selected((0, 0)));
+        assert!(state.plan().is_empty());
+    }
+
+    #[test]
+    fn undoing_takes_back_only_what_the_exclusion_added() {
+        let (mut state, _dir) = boot();
+        let roots = state.roots.clone();
+        let cache = roots.home.join(".cache");
+        let mut store = on_disk(&roots);
+        store
+            .config
+            .exclusions
+            .add(roots.home.join(".cache/fontconfig"));
+        store.save().unwrap();
+
+        let _ = state.update(Message::ScanFinished(
+            state.scans,
+            Box::new(scan_with_paths(&roots)),
+        ));
+        let _ = state.update(Message::SelectNone);
+        let _ = state.update(Message::Toggle((0, 0)));
+        let _ = state.update(Message::Toggle((0, 1)));
+        let _ = state.update(Message::ExcludeSelected);
+
+        // Fonts was already excluded, so only Thumbnails was added.
+        let added = state.excluded().expect("a notice").paths.clone();
+        assert_eq!(added, [cache.join("thumbnails")]);
+
+        let _ = state.update(Message::Include(added));
+
+        let exclusions = on_disk(&roots).config.exclusions;
+        assert!(!exclusions.covers(&cache.join("thumbnails")));
+        assert!(
+            exclusions.covers(&cache.join("fontconfig")),
+            "an undo must not remove an exclusion that was there before"
+        );
+        assert!(state.excluded().is_none(), "the offer has been answered");
+    }
+
+    #[test]
+    fn a_rescan_keeps_the_ticks_even_when_the_rows_move() {
+        let (state, _dir) = boot();
+        let old = scan_with_paths(&state.roots);
+        let mut new = old.clone();
+        // Excluding the first finding moves the other two up one.
+        new.categories[0].targets.remove(0);
+
+        let ticked = BTreeSet::from([(0, 0), (0, 2)]);
+        let carried = carry(&ticked, &old, &new);
+
+        // Thumbnails is gone; Pip was at 2 and is now at 1.
+        assert_eq!(carried, BTreeSet::from([(0, 1)]));
+    }
+
+    #[test]
+    fn a_tick_that_could_belong_to_two_rows_lands_on_neither() {
+        let (state, _dir) = boot();
+        let old = scan_with_paths(&state.roots);
+        let mut new = old.clone();
+        new.categories[0].targets[1].name = "Pip".to_owned();
+
+        let carried = carry(&BTreeSet::from([(0, 2)]), &old, &new);
+
+        assert!(carried.is_empty());
+    }
+
+    #[test]
+    fn a_tick_is_not_carried_onto_something_that_is_now_in_use() {
+        let (state, _dir) = boot();
+        let old = scan_with_paths(&state.roots);
+        let mut new = old.clone();
+        new.categories[0].targets[0].blocked = Some("Close it first".to_owned());
+
+        let carried = carry(&BTreeSet::from([(0, 0)]), &old, &new);
+
+        assert!(carried.is_empty());
+    }
+
+    #[test]
+    fn a_rescan_behind_the_results_keeps_the_ticks_but_a_fresh_scan_does_not() {
+        let (mut state, _dir) = boot();
+        let roots = state.roots.clone();
+        let _ = state.update(Message::ScanFinished(
+            state.scans,
+            Box::new(scan_with_paths(&roots)),
+        ));
+        let _ = state.update(Message::SelectNone);
+        let _ = state.update(Message::Toggle((0, 2)));
+
+        // Behind the results: the scan on screen stays up, the tick stays.
+        let _ = state.rescan();
+        let _ = state.update(Message::ScanFinished(
+            state.scans,
+            Box::new(scan_with_paths(&roots)),
+        ));
+        assert_eq!(state.selected, BTreeSet::from([(0, 2)]));
+
+        // Asked for: starts again from the safe set.
+        let _ = state.update(Message::StartScan);
+        let _ = state.update(Message::ScanFinished(
+            state.scans,
+            Box::new(scan_with_paths(&roots)),
+        ));
+        assert_eq!(state.selected, BTreeSet::from([(0, 0), (0, 1), (0, 2)]));
+    }
+
+    #[test]
+    fn a_scan_that_read_the_settings_before_they_changed_is_dropped() {
+        let (mut state, _dir) = boot();
+        let roots = state.roots.clone();
+        let _ = state.update(Message::ScanFinished(
+            state.scans,
+            Box::new(scan_with_paths(&roots)),
+        ));
+
+        let stale = state.scans;
+        let _ = state.rescan();
+        let _ = state.update(Message::ScanFinished(stale, Box::default()));
+
+        let Progress::Done(scan) = &state.progress else {
+            panic!("the scan on screen should stay");
+        };
+        assert_eq!(scan.categories[0].targets.len(), 3);
+    }
+
+    #[test]
+    fn excluding_from_the_storage_page_unticks_the_files_and_marks_them() {
+        let (mut state, _dir) = state_on_storage();
+        let file = PathBuf::from("/home/x/big.iso");
+        let _ = state.update(Message::ToggleFile(file.clone()));
+
+        let _ = state.update(Message::ExcludeFiles);
+
+        assert!(state.storage.selected.is_empty());
+        assert!(on_disk(&state.roots).config.exclusions.covers(&file));
+        assert_eq!(
+            state.storage.excluded.as_ref().expect("a notice").names,
+            ["big.iso"]
+        );
+        // Still listed, so an undo puts it back exactly where it was.
+        let survey = state.storage.survey.as_ref().unwrap();
+        assert!(survey.largest.iter().any(|entry| entry.path == file));
+        // And no longer something a plan can be made from.
+        assert!(state.storage.plan(Disposal::Trash).is_empty());
+    }
+
+    #[test]
+    fn a_setting_moves_a_step_at_a_time_and_stops_at_its_ends() {
+        let mut config = Config::default();
+        let versions = |config: &Config, direction| {
+            Setting::PackageVersions
+                .step(config, direction)
+                .map(|next| next.policy.keep_package_versions)
+        };
+        let days = |config: &Config, direction| {
+            Setting::JournalDays
+                .step(config, direction)
+                .map(|next| next.policy.keep_journal_days)
+        };
+
+        assert_eq!(versions(&config, Direction::Less), Some(2));
+        config.policy.keep_package_versions = MINIMUM_KEEP;
+        assert_eq!(versions(&config, Direction::Less), None);
+        config.policy.keep_package_versions = MAXIMUM_KEEP;
+        assert_eq!(versions(&config, Direction::More), None);
+
+        assert_eq!(days(&config, Direction::More), Some(30));
+        // A value typed into the file between two steps moves to its
+        // neighbours rather than jumping to an end.
+        config.policy.keep_journal_days = 20;
+        assert_eq!(days(&config, Direction::Less), Some(14));
+        assert_eq!(days(&config, Direction::More), Some(30));
+        config.policy.keep_journal_days = MINIMUM_DAYS;
+        assert_eq!(days(&config, Direction::Less), None);
+        config.policy.keep_journal_days = 400;
+        assert_eq!(days(&config, Direction::More), None);
+        assert_eq!(days(&config, Direction::Less), Some(365));
+    }
+
+    #[test]
+    fn adjusting_a_setting_builds_on_an_edit_made_by_hand_while_the_window_was_open() {
+        let (mut state, _dir) = boot();
+        let path = state.config().path().to_owned();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &path,
+            "version = 1\n\n[policy]\n# mine\nkeep_journal_days = 30\n",
+        )
+        .unwrap();
+
+        let _ = state.update(Message::Adjust(Setting::PackageVersions, Direction::Less));
+
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert!(written.contains("# mine"), "{written}");
+        assert!(written.contains("keep_journal_days = 30"), "{written}");
+        assert_eq!(on_disk(&state.roots).config.policy.keep_package_versions, 2);
+    }
+
+    #[test]
+    fn a_file_that_cannot_be_read_is_never_changed_from_the_window() {
+        let (mut state, _dir) = boot();
+        let path = state.config().path().to_owned();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "this is [not toml").unwrap();
+
+        let _ = state.update(Message::Adjust(Setting::PackageVersions, Direction::Less));
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "this is [not toml");
+        assert!(state.config_error().is_some());
+        assert!(!state.config().is_writable());
+    }
+
+    #[test]
+    fn a_typed_path_is_excluded_and_the_field_cleared() {
+        let (mut state, _dir) = boot();
+
+        let _ = state.update(Message::DraftChanged("  ~/Projects/keep  ".to_owned()));
+        let _ = state.update(Message::AddDraft);
+
+        let keep = state.roots.home.join("Projects/keep");
+        assert!(on_disk(&state.roots).config.exclusions.covers(&keep));
+        assert!(state.draft().is_empty());
+        assert!(state.config_error().is_none());
+    }
+
+    #[test]
+    fn a_typed_path_that_is_not_a_full_path_is_refused_with_a_reason() {
+        let (mut state, _dir) = boot();
+
+        let _ = state.update(Message::DraftChanged("Projects/keep".to_owned()));
+        let _ = state.update(Message::AddDraft);
+
+        assert!(on_disk(&state.roots).config.exclusions.is_empty());
+        assert!(
+            state
+                .config_error()
+                .is_some_and(|why| why.contains("full path"))
+        );
+        // Kept, so the person can fix it rather than type it again.
+        assert_eq!(state.draft(), "Projects/keep");
+    }
+
+    #[test]
+    fn opening_the_settings_page_reads_the_file_again() {
+        let (mut state, _dir) = boot();
+        let path = state.config().path().to_owned();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "[policy]\nkeep_package_versions = 5\n").unwrap();
+
+        let _ = state.update(Message::Navigate(Page::Settings));
+
+        assert_eq!(state.config().config.policy.keep_package_versions, 5);
     }
 }

@@ -4,18 +4,18 @@
 //! on the page explains where that number came from — and gets out of the
 //! way first when the window is small.
 
-use iced::widget::{Space, button, checkbox, column, container, row, text};
+use iced::widget::{Space, checkbox, column, container, row, text};
 use iced::{Alignment, Element, Length};
 
-use limpid_core::model::{Category, Kind, Risk, Scan, Target};
+use limpid_core::model::{Category, Risk, Scan, Target};
 use limpid_core::size::human;
 use limpid_theme::{Color, Palette};
 
-use crate::app::{Cleaned, Message, Progress, State, TargetId, placeholder};
+use crate::app::{Cleaned, Message, Progress, State, TargetId, placeholder, selectable};
 use crate::layout::Metrics;
 use crate::style;
 use crate::typography as ty;
-use crate::view::{action, tick_spacer};
+use crate::view::{self, Choice, action, chip, tick_spacer};
 use crate::widget::gauge::{Bar, Gauge};
 
 /// Hues cycled through the category cards, so that two groups next to each
@@ -54,6 +54,13 @@ fn found<'a>(
     let mut body = column![hero(palette, metrics, scan)]
         .spacing(metrics.gap)
         .width(Length::Fill);
+
+    if let Some(excluded) = state.excluded() {
+        body = body.push(view::excluded(palette, metrics, excluded));
+    }
+    if let Some(why) = state.config_error() {
+        body = body.push(view::failed(palette, metrics, why));
+    }
 
     if let Some(cleaned) = state.outcome() {
         body = body.push(result(palette, metrics, cleaned));
@@ -215,64 +222,23 @@ fn action_bar<'a>(palette: Palette, metrics: Metrics, state: &'a State) -> Eleme
         )
     };
 
-    let stacked = !metrics.two_columns() && !metrics.buttons_inline();
-    let mut clean = action("Clean", stacked)
-        .style(style::primary_button(palette))
-        .padding([10, 22]);
-    if count > 0 {
-        clean = clean.on_press(Message::AskToClean);
-    }
+    let some = count > 0;
+    let quiet: Vec<Choice<'a>> = vec![
+        ("Safe only", Some(Message::SelectSafe)),
+        ("None", Some(Message::SelectNone)),
+        (
+            "Exclude",
+            (some && state.config().is_writable()).then_some(Message::ExcludeSelected),
+        ),
+    ];
 
-    let picks = row![
-        button(text("Safe only").size(ty::BODY_SMALL))
-            .style(style::quiet_button(palette))
-            .padding([8, 14])
-            .on_press(Message::SelectSafe),
-        button(text("None").size(ty::BODY_SMALL))
-            .style(style::quiet_button(palette))
-            .padding([8, 14])
-            .on_press(Message::SelectNone),
-    ]
-    .spacing(ty::GAP_TIGHT)
-    .align_y(Alignment::Center);
-
-    let label = text(summary).size(ty::BODY).style(style::body(palette));
-
-    // Three tiers, because a clipped button is not a smaller button — it is
-    // one the user cannot tell is there.
-    let inner: Element<'a, Message> = if metrics.two_columns() {
-        row![
-            label.width(Length::Fill),
-            picks,
-            Space::new().width(Length::Fixed(ty::GAP_TIGHT)),
-            clean,
-        ]
-        .spacing(ty::GAP_TIGHT)
-        .align_y(Alignment::Center)
-        .into()
-    } else if metrics.buttons_inline() {
-        column![
-            label,
-            row![picks, Space::new().width(Length::Fill), clean]
-                .spacing(ty::GAP_TIGHT)
-                .align_y(Alignment::Center),
-        ]
-        .spacing(ty::GAP_TIGHT)
-        .into()
-    } else {
-        // The primary action takes the whole width rather than the sliver
-        // left over by the two beside it.
-        column![label, picks, clean]
-            .spacing(ty::GAP_TIGHT)
-            .width(Length::Fill)
-            .into()
-    };
-
-    container(inner)
-        .style(style::card(palette))
-        .padding(metrics.gap)
-        .width(Length::Fill)
-        .into()
+    view::selection_bar(
+        palette,
+        metrics,
+        summary,
+        quiet,
+        ("Clean", some.then_some(Message::AskToClean)),
+    )
 }
 
 /// The last chance to say no.
@@ -554,15 +520,7 @@ fn target_row<'a>(
         ));
     }
 
-    // A privileged target is selectable when the helper knows an operation
-    // for it; one that needs root and names no operation cannot be cleaned
-    // by anything, so offering a tick would be a lie.
-    let selectable = !target.size.is_zero()
-        && target.blocked.is_none()
-        && target.kind != Kind::Attention
-        && (target.is_actionable() || target.privileged.is_some());
-
-    let tick: Element<'a, Message> = if selectable {
+    let tick: Element<'a, Message> = if selectable(target) {
         checkbox(state.is_selected(id))
             .size(16)
             .style(style::tick(palette))
@@ -625,14 +583,6 @@ fn target_row<'a>(
         .style(style::well(palette))
         .padding([10, 12])
         .width(Length::Fill)
-        .into()
-}
-
-/// A small coloured label.
-fn chip<'a>(palette: Palette, label: &'a str, tint: Color) -> Element<'a, Message> {
-    container(text(label).size(ty::CAPTION))
-        .style(style::badge(palette, tint))
-        .padding([1, 7])
         .into()
 }
 
