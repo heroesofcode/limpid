@@ -70,7 +70,7 @@ pub fn view<'a>(palette: Palette, metrics: Metrics, state: &'a State) -> Element
     }
 
     if storage.confirming_delete {
-        body = body.push(confirmation(palette, metrics, storage));
+        body = body.push(confirmation(palette, metrics, state));
     } else if !storage.selected.is_empty() {
         body = body.push(action_bar(
             palette,
@@ -258,22 +258,41 @@ fn action_bar<'a>(
 }
 
 /// The confirmation for removing outright rather than trashing.
-fn confirmation<'a>(palette: Palette, metrics: Metrics, storage: &Storage) -> Element<'a, Message> {
+fn confirmation<'a>(palette: Palette, metrics: Metrics, state: &State) -> Element<'a, Message> {
+    let storage = state.storage();
     let plan = storage.plan(Disposal::Delete);
 
-    let mut lines = column![].spacing(4).width(Length::Fill);
+    let mut lines = column![].spacing(6).width(Length::Fill);
     for item in &plan.items {
+        // Where each one is as well as what it is called: two files called
+        // `backup.tar` are two different questions.
+        let folder = item
+            .paths
+            .first()
+            .and_then(|path| path.parent())
+            .map(|parent| state.config().display(parent))
+            .unwrap_or_default();
         lines = lines.push(
-            row![
-                text(item.name.clone())
-                    .size(ty::BODY_SMALL)
-                    .style(style::body(palette))
+            column![
+                row![
+                    text(item.name.clone())
+                        .size(ty::BODY_SMALL)
+                        .style(style::body(palette))
+                        .wrapping(Wrapping::WordOrGlyph)
+                        .width(Length::Fill),
+                    text(human(item.expected.on_disk))
+                        .size(ty::BODY_SMALL)
+                        .style(style::secondary(palette)),
+                ]
+                .spacing(ty::GAP_TIGHT)
+                .width(Length::Fill),
+                text(folder)
+                    .size(ty::CAPTION)
+                    .style(style::secondary(palette))
                     .wrapping(Wrapping::WordOrGlyph)
                     .width(Length::Fill),
-                text(human(item.expected.on_disk))
-                    .size(ty::BODY_SMALL)
-                    .style(style::secondary(palette)),
             ]
+            .spacing(2)
             .width(Length::Fill),
         );
     }
@@ -283,10 +302,12 @@ fn confirmation<'a>(palette: Palette, metrics: Metrics, storage: &Storage) -> El
         .style(style::quiet_button(palette))
         .padding([10, 18])
         .on_press(Message::CancelDelete);
+    let large = storage.magnitude();
+    let allowed = large.is_none() || storage.checked_large;
     let remove = action("Delete permanently", stacked)
         .style(style::danger_button(palette))
         .padding([10, 20])
-        .on_press(Message::DeleteSelected);
+        .on_press_maybe(allowed.then_some(Message::DeleteSelected));
 
     let actions: Element<'a, Message> = if stacked {
         column![cancel, remove]
@@ -299,29 +320,42 @@ fn confirmation<'a>(palette: Palette, metrics: Metrics, storage: &Storage) -> El
             .into()
     };
 
-    container(
-        column![
-            text(format!(
-                "Delete {} permanently?",
-                human(plan.expected().on_disk)
-            ))
-            .size(ty::TITLE)
-            .style(style::heading(palette))
-            .width(Length::Fill),
-            text(
-                "These do not go to the trash and cannot be recovered. Moving them to \
-                 the trash instead frees the same space once you empty it.",
-            )
-            .size(ty::BODY_SMALL)
-            .style(style::secondary(palette))
-            .width(Length::Fill),
-            Space::new().height(Length::Fixed(ty::GAP_TIGHT)),
-            lines,
-            Space::new().height(Length::Fixed(ty::GAP)),
-            actions,
-        ]
-        .spacing(4)
+    let mut body = column![
+        text(format!(
+            "Delete {} permanently?",
+            human(plan.expected().on_disk)
+        ))
+        .size(ty::TITLE)
+        .style(style::heading(palette))
         .width(Length::Fill),
+        text(
+            "These do not go to the trash and cannot be recovered. Moving them to \
+             the trash instead frees the same space once you empty it.",
+        )
+        .size(ty::BODY_SMALL)
+        .style(style::secondary(palette))
+        .width(Length::Fill),
+        Space::new().height(Length::Fixed(ty::GAP_TIGHT)),
+        lines,
+    ]
+    .spacing(4)
+    .width(Length::Fill);
+
+    // Between the list and the way to act on it.
+    if let Some(magnitude) = &large {
+        body = body.push(Space::new().height(Length::Fixed(ty::GAP_TIGHT)));
+        body = body.push(view::large(
+            palette,
+            metrics,
+            magnitude,
+            storage.checked_large,
+            Message::CheckLargeDelete,
+        ));
+    }
+
+    container(
+        body.push(Space::new().height(Length::Fixed(ty::GAP)))
+            .push(actions),
     )
     .style(style::card(palette))
     .padding(metrics.card)

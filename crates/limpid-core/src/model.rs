@@ -69,6 +69,45 @@ impl Risk {
     }
 }
 
+/// Where a finding stands on the first question anyone asks: can it go
+/// now, and if not, why not.
+///
+/// Every finding that is reclaimable space has exactly one, so the four
+/// totals in a [`Tally`] add up to what was found — a figure that could be
+/// counted twice, or not at all, is a figure nobody can check.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Standing {
+    /// In the default selection: this process can remove it, and it
+    /// regenerates with no consequence.
+    Ready,
+    /// Could go, but only once someone decides it should.
+    NeedsDecision,
+    /// Something has it open, so it cannot go now.
+    InUse,
+    /// Only the privileged helper can remove it.
+    NeedsRoot,
+}
+
+/// A scan's findings, totalled by [`Standing`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Tally {
+    /// What the default selection takes.
+    pub ready: Size,
+    /// What is offered but not ticked.
+    pub needs_decision: Size,
+    /// What cannot go until something closes.
+    pub in_use: Size,
+    /// What only the helper can remove.
+    pub needs_root: Size,
+}
+
+impl Tally {
+    /// Everything counted, which is everything found that is space.
+    pub fn total(&self) -> Size {
+        self.ready + self.needs_decision + self.in_use + self.needs_root
+    }
+}
+
 /// One thing that could be cleaned.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Target {
@@ -208,6 +247,29 @@ impl Target {
         self
     }
 
+    /// Where this stands, or `None` for something that is not reclaimable
+    /// space at all.
+    ///
+    /// The order of the checks is the order of the reasons: needing root
+    /// is the one that holds whatever else changes, and being open is
+    /// temporary but decides the moment. It agrees with
+    /// [`crate::plan::Selection::SAFE`] by construction, and a test holds
+    /// it to that, because "ready" means "what the default selection takes"
+    /// or it means nothing.
+    pub fn standing(&self) -> Option<Standing> {
+        if self.kind == Kind::Attention {
+            None
+        } else if self.requires_root {
+            Some(Standing::NeedsRoot)
+        } else if self.blocked.is_some() {
+            Some(Standing::InUse)
+        } else if self.risk > Risk::Safe {
+            Some(Standing::NeedsDecision)
+        } else {
+            Some(Standing::Ready)
+        }
+    }
+
     /// Whether this target is worth showing.
     ///
     /// Targets that need attention are always worth showing — they are not
@@ -244,6 +306,7 @@ impl Category {
     }
 
     /// Total size across targets at or below `risk` that could be acted on.
+    #[cfg(test)]
     pub fn size_at_most(&self, risk: Risk) -> Size {
         self.targets
             .iter()
@@ -272,13 +335,23 @@ impl Scan {
         self.categories.iter().map(Category::size).sum()
     }
 
-    /// Total size that could be reclaimed without elevation and without
-    /// touching anything marked sensitive.
-    pub fn reclaimable_unprivileged(&self) -> Size {
-        self.categories
+    /// Everything found, by where it stands.
+    pub fn tally(&self) -> Tally {
+        let mut tally = Tally::default();
+        for target in self
+            .categories
             .iter()
-            .map(|category| category.size_at_most(Risk::Review))
-            .sum()
+            .flat_map(|category| &category.targets)
+        {
+            match target.standing() {
+                Some(Standing::Ready) => tally.ready += target.size,
+                Some(Standing::NeedsDecision) => tally.needs_decision += target.size,
+                Some(Standing::InUse) => tally.in_use += target.size,
+                Some(Standing::NeedsRoot) => tally.needs_root += target.size,
+                None => {}
+            }
+        }
+        tally
     }
 
     /// Drop categories that found nothing, so the UI has no empty sections.
@@ -318,7 +391,7 @@ mod tests {
     }
 
     #[test]
-    fn sensitive_and_privileged_targets_are_left_out_of_the_reclaimable_total() {
+    fn only_what_the_default_selection_takes_counts_as_ready() {
         let mut category = Category::new("Mixed", "");
         category.targets.push(target("safe", 100, Risk::Safe));
         category.targets.push(target("review", 200, Risk::Review));
@@ -333,9 +406,72 @@ mod tests {
             categories: vec![category],
             ..Scan::default()
         };
+        let tally = scan.tally();
 
-        assert_eq!(scan.size().on_disk, 1500);
-        assert_eq!(scan.reclaimable_unprivileged().on_disk, 300);
+        // A 21 GB project under review once made the ring say 22 GB ready.
+        assert_eq!(tally.ready.on_disk, 100);
+        assert_eq!(tally.needs_decision.on_disk, 600);
+        assert_eq!(tally.needs_root.on_disk, 800);
+        assert_eq!(tally.total(), scan.size());
+    }
+
+    #[test]
+    fn a_finding_is_ready_exactly_when_the_safe_selection_takes_it() {
+        use crate::plan::Selection;
+        use crate::privileged::Operation;
+
+        for risk in [Risk::Safe, Risk::Review, Risk::Sensitive] {
+            for kind in [Kind::Cache, Kind::Attention] {
+                for blocked in [false, true] {
+                    for root in [None, Some(false), Some(true)] {
+                        let mut target = Target::new("t", kind, risk);
+                        if blocked {
+                            target = target.blocked("open");
+                        }
+                        target = match root {
+                            None => target,
+                            Some(false) => target.requires_root(),
+                            Some(true) => target.by_operation(Operation::RemoveCoredumps),
+                        };
+
+                        assert_eq!(
+                            target.standing() == Some(Standing::Ready),
+                            Selection::SAFE.includes(&target),
+                            "{risk:?} {kind:?} blocked={blocked} root={root:?}",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn every_finding_that_is_space_is_counted_once() {
+        let mut category = Category::new("All", "");
+        category.targets.push(target("ready", 1, Risk::Safe));
+        category.targets.push(target("decide", 10, Risk::Review));
+        category
+            .targets
+            .push(target("open", 100, Risk::Review).blocked("Brave is running"));
+        category
+            .targets
+            .push(target("root", 1000, Risk::Review).requires_root());
+        category.targets.push(
+            Target::new("pacnew", Kind::Attention, Risk::Sensitive).measured(Size::new(5, 5), 1),
+        );
+
+        let tally = Scan {
+            categories: vec![category],
+            ..Scan::default()
+        }
+        .tally();
+
+        assert_eq!(tally.ready.on_disk, 1);
+        assert_eq!(tally.needs_decision.on_disk, 10);
+        assert_eq!(tally.in_use.on_disk, 100);
+        assert_eq!(tally.needs_root.on_disk, 1000);
+        // Something to resolve, not space to reclaim.
+        assert_eq!(tally.total().on_disk, 1111);
     }
 
     #[test]
@@ -368,7 +504,8 @@ mod tests {
         // Still shown, because the user needs to know it is there and why.
         assert_eq!(scan.size().on_disk, 1000);
         // But not counted as available, because it is not.
-        assert_eq!(scan.reclaimable_unprivileged().on_disk, 100);
+        assert_eq!(scan.tally().ready.on_disk, 100);
+        assert_eq!(scan.tally().in_use.on_disk, 900);
     }
 
     #[test]

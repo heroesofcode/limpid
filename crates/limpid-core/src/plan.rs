@@ -11,6 +11,47 @@ use crate::guard::Permission;
 use crate::model::{Kind, Risk, Target};
 use crate::privileged::Operation;
 use crate::size::Size;
+use crate::volume::Capacity;
+
+/// Below this, no plan is large enough to question. On a nearly empty disk
+/// an ordinary cache is a big share of very little, and asking about it
+/// would teach people to tick the box without reading.
+const LARGE_FLOOR: u64 = 1 << 30;
+
+/// Above this share of everything stored on the disk, a plan is looked at
+/// twice.
+///
+/// Not because removing that much is wrong — a quarter of a developer's disk
+/// can honestly be one project's build output — but because a scanner bug
+/// that turns a cache into a home directory looks exactly like this, and the
+/// guard should not be the only thing that notices.
+const LARGE_SHARE: f64 = 0.25;
+
+/// A plan too large to go through on the usual single confirmation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Magnitude {
+    /// What the plan expects to reclaim.
+    pub expected: Size,
+    /// That, as a share of the space in use on the disk. `None` when the
+    /// disk could not be measured.
+    pub share: Option<f64>,
+}
+
+impl Magnitude {
+    /// A sentence saying how large, for the confirmation.
+    pub fn describe(&self) -> String {
+        match self.share {
+            Some(share) => format!(
+                "This removes {:.0}% of everything stored on this disk, which is more \
+                 than a cleaner usually finds.",
+                share * 100.0,
+            ),
+            None => "The size of this disk could not be read, so there is nothing to \
+                     compare this with."
+                .to_owned(),
+        }
+    }
+}
 
 /// How a target should be got rid of.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -189,6 +230,29 @@ impl Plan {
         !self.operations.is_empty()
     }
 
+    /// Whether this plan is too large to go through on the usual single
+    /// confirmation, measured against the disk it is on.
+    ///
+    /// Everything counts, the privileged half too: the helper's operations
+    /// are bounded, but what they were measured to free is still a claim
+    /// about this disk. A disk that could not be measured is not a reason to
+    /// wave a large plan through — anything over the floor is questioned.
+    pub fn magnitude(&self, capacity: Option<Capacity>) -> Option<Magnitude> {
+        let expected = self.expected();
+        if expected.on_disk < LARGE_FLOOR {
+            return None;
+        }
+
+        let share = capacity
+            .filter(|capacity| capacity.used() > 0)
+            .map(|capacity| expected.on_disk as f64 / capacity.used() as f64);
+
+        match share {
+            Some(share) if share <= LARGE_SHARE => None,
+            share => Some(Magnitude { expected, share }),
+        }
+    }
+
     /// Whether anything in the plan is removed rather than trashed.
     ///
     /// Drives the wording of the confirmation: "removed permanently" needs a
@@ -231,6 +295,66 @@ impl Selection {
 impl Default for Selection {
     fn default() -> Self {
         Self::SAFE
+    }
+}
+
+#[cfg(test)]
+mod magnitude {
+    use super::*;
+
+    const GIB: u64 = 1 << 30;
+
+    fn plan_of(bytes: u64) -> Plan {
+        Plan::from_chosen(
+            [(PathBuf::from("/home/x/big"), Size::new(bytes, bytes))],
+            Disposal::Delete,
+        )
+    }
+
+    fn disk(used: u64) -> Option<Capacity> {
+        Some(Capacity {
+            total: used * 2,
+            available: used,
+        })
+    }
+
+    #[test]
+    fn a_plan_that_is_a_large_share_of_the_disk_is_questioned() {
+        // One project's build output on this machine: 21.6 of 52 GB in use.
+        let large = plan_of(21 * GIB + GIB / 2)
+            .magnitude(disk(52 * GIB))
+            .unwrap();
+
+        assert!(large.share.is_some_and(|share| share > 0.4));
+        assert!(large.describe().contains("41%"), "{}", large.describe());
+    }
+
+    #[test]
+    fn a_plan_that_is_a_small_share_goes_through() {
+        assert_eq!(plan_of(5 * GIB).magnitude(disk(100 * GIB)), None);
+    }
+
+    #[test]
+    fn nothing_under_the_floor_is_questioned_however_empty_the_disk() {
+        // Half of a nearly empty disk, and still only a cache.
+        assert_eq!(plan_of(GIB / 2).magnitude(disk(GIB)), None);
+    }
+
+    #[test]
+    fn a_disk_that_cannot_be_measured_does_not_wave_a_large_plan_through() {
+        let unknown = plan_of(2 * GIB).magnitude(None).unwrap();
+
+        assert_eq!(unknown.share, None);
+        assert!(plan_of(GIB / 2).magnitude(None).is_none());
+    }
+
+    #[test]
+    fn the_privileged_half_counts_too() {
+        let mut plan = plan_of(GIB / 2);
+        plan.operations.push(Operation::VacuumJournal { days: 7 });
+        plan.operations_expected = Size::new(30 * GIB, 30 * GIB);
+
+        assert!(plan.magnitude(disk(52 * GIB)).is_some());
     }
 }
 

@@ -211,7 +211,13 @@ pub fn danger_button(palette: Palette) -> impl Fn(&Theme, button::Status) -> but
             _ => palette.red,
         };
         button::Style {
-            background: Some(Background::Color(to_iced(base))),
+            // Faded when it cannot be pressed yet — a large clean waits for
+            // the list to be read — or it looks like it is waiting for a
+            // click it will ignore.
+            background: Some(Background::Color(match status {
+                button::Status::Disabled => faded(palette.red, 0.35),
+                _ => to_iced(base),
+            })),
             text_color: to_iced(palette.on(base)),
             border: Border {
                 color: IcedColor::TRANSPARENT,

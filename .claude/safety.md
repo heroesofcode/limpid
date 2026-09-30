@@ -205,6 +205,19 @@ pnpm is not offered. Its `node_modules` is hardlinks into a store shared by
 every project, so removing one frees almost nothing, and the size measured
 for it would promise the whole thing.
 
+## 13. A plan out of proportion is questioned, not waved through
+
+`Plan::magnitude`. A plan of at least 1 GiB that is more than a quarter of
+the space in use on the disk needs an extra, explicit yes: the confirmation
+waits for "I have read the list", and `clean --apply` refuses without
+`--accept-large`. The GUI refuses in `update` as well as by greying out the
+button, and the tick is asked for again every time the confirmation opens.
+
+The guard checks each path; nothing else checks the whole. A scanner bug
+that turns a cache into a home directory would pass a path-by-path check
+that the boundary list happened not to catch, and it would look exactly like
+this. A disk that could not be measured counts as large, not as fine.
+
 ## Checklist for adding a scanner
 
 A scanner is a list of paths and an explanation. It must not know how to

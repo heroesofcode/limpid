@@ -514,7 +514,7 @@ pub fn expand(text: &str, home: &Path) -> Option<PathBuf> {
 ///
 /// So that the file can be carried to another machine, or another user
 /// name, with the rest of someone's dotfiles.
-fn contract(path: &Path, home: &Path) -> String {
+pub fn contract(path: &Path, home: &Path) -> String {
     match path.strip_prefix(home) {
         Ok(rest) if rest.as_os_str().is_empty() => "~".to_owned(),
         Ok(rest) => format!("~/{}", rest.display()),

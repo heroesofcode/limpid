@@ -139,18 +139,22 @@ when the trash is emptied.
 
 ### Before acting, and before releasing
 
-- **The Overview's "ready" figure has to mean ready.** It counts everything
-  short of sensitive — what needs a decision, and even what is blocked by an
-  open browser. With small review items nobody noticed; with a project being
-  worked on, the ring would say 22 GB ready when 21.6 of it is deliberately
-  not ticked. It should be what the default selection would take, with the
-  rest shown as needing a decision.
-- Show the exact list before acting. The confirmation shows target names and
-  totals, while the README says you see the exact list. For build artifacts
-  the names are the paths, so they already are the list.
-- Sanity check on magnitude: refuse to proceed quietly when a plan would
-  remove an implausible share of the disk. It matters from this release,
-  because this is the first one where a single plan can be 17 GB.
+- **The Overview's "ready" figure means ready — done.** It used to count
+  everything short of sensitive that this process could act on, including
+  what needs a decision; with a project being worked on the ring said 22 GB
+  ready when 21.6 of it is deliberately not ticked. Now every finding has one
+  `Standing` — ready, needs a decision, in use, needs root — the four add up
+  to what was found, and ready is what `Selection::SAFE` takes, held to that
+  by a test. The Overview and the CLI say the same thing.
+- **The exact list before acting — done.** Both confirmations and the CLI's
+  dry run list every folder that is emptied and every file that goes, under
+  the name that was ticked.
+- **A sanity check on magnitude — done.** A plan of at least 1 GiB that is
+  more than a quarter of everything stored on the disk does not go through
+  on the usual click: the confirmation says how large, and waits for "I have
+  read the list"; `clean --apply` refuses without `--accept-large`. On the
+  reference machine, cleaning the project being worked on is 42% of the
+  disk, and asks.
 - Watch the password path work once from the installed application. It has
   run end to end from the CLI — on 2026-09-28 it trimmed four packages from
   the real pacman cache — but the GUI has only been seen refusing.

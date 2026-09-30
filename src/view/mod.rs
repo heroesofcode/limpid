@@ -1,8 +1,9 @@
 //! The screens.
 
-use iced::widget::{Row, Space, button, column, container, row, text};
+use iced::widget::{Row, Space, button, checkbox, column, container, row, text};
 use iced::{Alignment, Element, Length};
 
+use limpid_core::plan::Magnitude;
 use limpid_theme::{Color, Palette};
 
 use crate::app::{Excluded, Message};
@@ -199,6 +200,40 @@ pub fn excluded<'a>(
         .padding(metrics.gap)
         .width(Length::Fill)
         .into()
+}
+
+/// The extra step a large plan needs: what makes it large, and a box to say
+/// the list above was read.
+///
+/// A box rather than a second dialog. The list it asks about is right
+/// above it, and a dialog would cover the very thing it asks about.
+pub fn large<'a>(
+    palette: Palette,
+    metrics: Metrics,
+    magnitude: &Magnitude,
+    checked: bool,
+    on_toggle: fn(bool) -> Message,
+) -> Element<'a, Message> {
+    container(
+        column![
+            text(magnitude.describe())
+                .size(ty::BODY_SMALL)
+                .style(style::tinted(palette.orange))
+                .width(Length::Fill),
+            checkbox(checked)
+                .label("I have read the list")
+                .size(16)
+                .text_size(ty::BODY_SMALL)
+                .style(style::tick(palette))
+                .on_toggle(on_toggle),
+        ]
+        .spacing(ty::GAP_TIGHT)
+        .width(Length::Fill),
+    )
+    .style(style::well(palette))
+    .padding(metrics.gap)
+    .width(Length::Fill)
+    .into()
 }
 
 /// A change to the settings that did not stick, said where it was tried.

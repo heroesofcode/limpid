@@ -13,11 +13,12 @@ use limpid_core::config::{Config, Exclusions, Store};
 use limpid_core::execute::{Executor, Outcome};
 use limpid_core::model::{Category, Kind, Scan, Target};
 use limpid_core::paths::Roots;
-use limpid_core::plan::{Disposal, Plan, Selection};
+use limpid_core::plan::{Disposal, Magnitude, Plan, Selection};
 use limpid_core::privileged::{
     MAXIMUM_DAYS, MAXIMUM_KEEP, MINIMUM_DAYS, MINIMUM_KEEP, Report, Request, Runner,
 };
 use limpid_core::size::Size;
+use limpid_core::volume::{self, Capacity};
 use limpid_core::walk::WalkOptions;
 use limpid_theme::{Palette, Source, Theme as LimpidTheme};
 
@@ -185,6 +186,12 @@ pub struct Storage {
     pub selected: BTreeSet<PathBuf>,
     /// Whether the permanent-deletion confirmation is up.
     pub confirming_delete: bool,
+    /// The disk the files are on, read when the confirmation opened, so a
+    /// large deletion can be measured against it.
+    pub capacity: Option<Capacity>,
+    /// Whether the person has said they read the list of a deletion too
+    /// large to go through on the usual click.
+    pub checked_large: bool,
     /// Whether a removal is under way.
     pub removing: bool,
     /// What the last removal from this page did.
@@ -238,6 +245,12 @@ impl Storage {
     pub fn plan(&self, disposal: Disposal) -> Plan {
         Plan::from_chosen(self.chosen(), disposal)
     }
+
+    /// Whether the permanent deletion on offer is too large for the usual
+    /// click.
+    pub fn magnitude(&self) -> Option<Magnitude> {
+        self.plan(Disposal::Delete).magnitude(self.capacity)
+    }
 }
 
 /// Everything the window shows.
@@ -252,6 +265,9 @@ pub struct State {
     selected: BTreeSet<TargetId>,
     /// Whether the confirmation is up.
     confirming: bool,
+    /// Whether the person has said they read the list of a clean too large
+    /// to go through on the usual click.
+    checked_large: bool,
     /// Whether a clean is under way.
     cleaning: bool,
     /// What the last clean did.
@@ -337,6 +353,10 @@ pub enum Message {
     ExcludeFiles,
     /// Take these back out of the exclusions.
     Include(Vec<PathBuf>),
+    /// The "I have read the list" box on a large clean.
+    CheckLarge(bool),
+    /// The same box on a large permanent deletion.
+    CheckLargeDelete(bool),
     /// The path being typed on the settings page changed.
     DraftChanged(String),
     /// Exclude the path typed on the settings page.
@@ -363,6 +383,7 @@ impl State {
             progress: Progress::Idle,
             selected: BTreeSet::new(),
             confirming: false,
+            checked_large: false,
             cleaning: false,
             outcome: None,
             storage: Storage::default(),
@@ -463,6 +484,16 @@ impl State {
     /// What acting on the current selection would do.
     pub fn plan(&self) -> Plan {
         Plan::from_targets(self.chosen())
+    }
+
+    /// Whether the clean on offer is too large for the usual click.
+    pub fn magnitude(&self) -> Option<Magnitude> {
+        self.plan().magnitude(self.scan()?.capacity)
+    }
+
+    /// Whether the person has said they read the list of a large clean.
+    pub fn checked_large(&self) -> bool {
+        self.checked_large
     }
 
     /// Act on the storage page's selection.
@@ -595,14 +626,31 @@ impl State {
             }
             Message::AskToDelete => {
                 self.storage.confirming_delete = !self.storage.plan(Disposal::Delete).is_empty();
+                // Asked every time it opens: a tick given for one list is
+                // not a tick for the next.
+                self.storage.checked_large = false;
+                self.storage.capacity = volume::capacity(&self.roots.home);
                 Task::none()
             }
             Message::CancelDelete => {
                 self.storage.confirming_delete = false;
+                self.storage.checked_large = false;
+                Task::none()
+            }
+            Message::CheckLargeDelete(checked) => {
+                self.storage.checked_large = checked;
                 Task::none()
             }
             Message::TrashSelected => self.remove_selection(Disposal::Trash),
-            Message::DeleteSelected => self.remove_selection(Disposal::Delete),
+            Message::DeleteSelected => {
+                // Refused here and not only by a greyed-out button: the
+                // button is how it is usually asked for, not the only way.
+                if self.storage.magnitude().is_some() && !self.storage.checked_large {
+                    return Task::none();
+                }
+                self.storage.checked_large = false;
+                self.remove_selection(Disposal::Delete)
+            }
             Message::Reveal(path) => {
                 // Off the frame loop: talking to a file manager that has to
                 // be started cold is not instant, and the answer is not
@@ -709,10 +757,16 @@ impl State {
             Message::AskToClean => {
                 // Nothing selected is not a question worth asking.
                 self.confirming = !self.plan().is_empty();
+                self.checked_large = false;
                 Task::none()
             }
             Message::Cancel => {
                 self.confirming = false;
+                self.checked_large = false;
+                Task::none()
+            }
+            Message::CheckLarge(checked) => {
+                self.checked_large = checked;
                 Task::none()
             }
             Message::Clean => {
@@ -721,7 +775,13 @@ impl State {
                     self.confirming = false;
                     return Task::none();
                 }
+                // Refused here and not only by a greyed-out button, for the
+                // same reason the executor re-checks what the scan checked.
+                if self.magnitude().is_some() && !self.checked_large {
+                    return Task::none();
+                }
                 self.confirming = false;
+                self.checked_large = false;
                 self.cleaning = true;
                 self.outcome = None;
                 self.excluded = None;
@@ -965,6 +1025,7 @@ impl State {
             .retain(|path| !exclusions.covers(path));
         if self.storage.plan(Disposal::Delete).is_empty() {
             self.storage.confirming_delete = false;
+            self.storage.checked_large = false;
         }
 
         // Unticked now rather than when the rescan lands: in between, the
@@ -988,6 +1049,7 @@ impl State {
         // A confirmation listing what is about to be removed must not
         // change while it is being read.
         self.confirming = false;
+        self.checked_large = false;
 
         self.rescan()
     }
@@ -1991,5 +2053,104 @@ mod tests {
         let _ = state.update(Message::Navigate(Page::Settings));
 
         assert_eq!(state.config().config.policy.keep_package_versions, 5);
+    }
+
+    const GIB: u64 = 1 << 30;
+
+    /// A disk with this much in use, and as much again free.
+    fn disk(used: u64) -> Capacity {
+        Capacity {
+            total: used * 2,
+            available: used,
+        }
+    }
+
+    /// A scan whose one finding is most of a small disk.
+    fn state_with_a_large_scan() -> (State, tempfile::TempDir) {
+        use limpid_core::model::{Category, Kind, Risk};
+
+        let (mut state, dir) = boot();
+        let mut category = Category::new("Projects", "");
+        category.targets = vec![
+            Target::new("~/Work/old/target", Kind::BuildArtifact, Risk::Safe)
+                .path(state.roots.home.join("Work/old/target"))
+                .measured(Size::new(3 * GIB, 3 * GIB), 1),
+        ];
+        let scan = Scan {
+            categories: vec![category],
+            capacity: Some(disk(4 * GIB)),
+            ..Scan::default()
+        };
+        let _ = state.update(Message::ScanFinished(state.scans, Box::new(scan)));
+        (state, dir)
+    }
+
+    #[test]
+    fn a_clean_that_is_most_of_the_disk_waits_for_the_list_to_be_read() {
+        let (mut state, _dir) = state_with_a_large_scan();
+        let _ = state.update(Message::AskToClean);
+        assert!(state.magnitude().is_some());
+
+        // The button is greyed out, and the message is refused as well.
+        let _ = state.update(Message::Clean);
+        assert!(state.is_confirming(), "still asking");
+        assert!(!state.is_cleaning());
+
+        let _ = state.update(Message::CheckLarge(true));
+        let _ = state.update(Message::Clean);
+        assert!(state.is_cleaning());
+    }
+
+    #[test]
+    fn saying_the_list_was_read_counts_for_one_list_only() {
+        let (mut state, _dir) = state_with_a_large_scan();
+        let _ = state.update(Message::AskToClean);
+        let _ = state.update(Message::CheckLarge(true));
+        let _ = state.update(Message::Cancel);
+
+        let _ = state.update(Message::AskToClean);
+
+        assert!(!state.checked_large());
+    }
+
+    #[test]
+    fn an_ordinary_clean_needs_no_extra_step() {
+        let (mut state, _dir) = state_with_scan();
+        let _ = state.update(Message::AskToClean);
+
+        assert!(state.magnitude().is_none());
+        let _ = state.update(Message::Clean);
+        assert!(state.is_cleaning());
+    }
+
+    #[test]
+    fn a_large_permanent_deletion_waits_for_the_list_to_be_read() {
+        let (mut state, _dir) = state_on_storage();
+        let file = PathBuf::from("/home/x/big.iso");
+        if let Some(survey) = &mut state.storage.survey {
+            for entry in survey
+                .breakdown
+                .children
+                .iter_mut()
+                .chain(&mut survey.largest)
+            {
+                if entry.path == file {
+                    entry.size = Size::new(3 * GIB, 3 * GIB);
+                }
+            }
+        }
+        let _ = state.update(Message::ToggleFile(file));
+        let _ = state.update(Message::AskToDelete);
+        // Read from the machine the test runs on, which says nothing about
+        // this; set to a disk the file is most of.
+        state.storage.capacity = Some(disk(4 * GIB));
+
+        let _ = state.update(Message::DeleteSelected);
+        assert!(!state.storage.removing, "refused until the list is read");
+        assert!(state.storage.confirming_delete);
+
+        let _ = state.update(Message::CheckLargeDelete(true));
+        let _ = state.update(Message::DeleteSelected);
+        assert!(state.storage.removing);
     }
 }
