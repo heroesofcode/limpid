@@ -176,18 +176,21 @@ some capability for it:
 
 ## Roadmap
 
-| Phase | Scope |
+Built so far: the scanning engine and CLI, the desktop theme with live
+reload, the application, safe cleaning, browsers, the storage view and its
+treemap, pacman, journald and coredumps through the privileged helper,
+acting on files from the storage view, and release binaries with a
+PKGBUILD.
+
+| Release | What it adds |
 |---|---|
-| 0 | Foundation: workspace, CI, releases ✓ |
-| 1 | Scanning engine and headless CLI ✓ |
-| 2 | Theme: Omarchy palette, live reload, standalone fallback ✓ |
-| 3 | The application shell ✓ |
-| 4 | Safe cleaning: dry run, trash, protected paths ✓ |
-| 5 | Browsers: Chromium family and Firefox ✓ |
-| 6 | Space analyser: treemap and largest items ✓ |
-| 7 | Duplicate files |
-| 8 | Privileged targets: pacman, journald, coredumps ✓ |
-| 9 | Packaging: desktop entry, icon, release binaries, AUR ✓ |
+| 0.4 | Settings and exclusions ✓ · project build artifacts · folders in the storage view · the first AUR release |
+| 0.5 | History of every run, and undo |
+| 0.6 | Duplicate files · large files nobody has opened in years |
+| 0.7 | Exact accounting: what a removal really frees on btrfs, and a check afterwards |
+| 0.8 | Reclaiming space without deleting anything: deduplication, recompression, snapshot thinning |
+| 0.9 | A declarative catalog, and many more applications |
+| 0.10 | Automatic maintenance, other distributions, Flathub |
 
 ## Layout
 
