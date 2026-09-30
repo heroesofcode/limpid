@@ -65,6 +65,24 @@ limpid-cli theme                      # the palette in force, and its source
 limpid-cli theme --file colors.toml   # resolve a specific theme
 ```
 
+## Your projects
+
+On a developer's machine the largest thing on the disk is usually build
+output: a Rust project's `target/`, a JavaScript project's `node_modules/`.
+No list of places can name it, because projects live wherever their authors
+put them, so Limpid finds it by a rule. A directory is build output when the
+tool left a mark in two places — its manifest beside it (`Cargo.toml`;
+`package.json` and a lockfile) and its own evidence inside it (Cargo's
+`CACHEDIR.TAG`; npm's or Yarn's install state). A directory that merely has
+the name is left alone, and so is anything below a hidden directory, where
+applications keep installations that look exactly like projects.
+
+Each project is listed with when it was last worked on, judged by git, by the
+project's own files and by the last build. Untouched for three months, it
+starts ticked; worked on since, it is listed and waits for you. It is deleted
+rather than trashed, because one command brings it back, and a build running
+in it stops the removal.
+
 ## Where the space went
 
 The catalogue can only find what someone wrote a scanner for. The storage
@@ -170,6 +188,9 @@ some capability for it:
   undecryptable.
 - **No blanket rules.** Removing orphan packages asks per package. `.pacnew`
   files are reported as work to do, never as reclaimable space.
+- **Build output is found by a rule, and the rule is asked again** at the
+  moment of removal, like everything else: a `Cargo.toml` deleted since the
+  scan and the `target/` beside it is no longer build output.
 - **An exclusion is a refusal, not a filter.** The scanners leave excluded
   paths out, and the executor refuses them too, so a selection made before
   the exclusion was added still cannot remove what was excluded.

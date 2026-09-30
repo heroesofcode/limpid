@@ -4,6 +4,7 @@
 //! on the page explains where that number came from — and gets out of the
 //! way first when the window is small.
 
+use iced::widget::text::Wrapping;
 use iced::widget::{Space, checkbox, column, container, row, text};
 use iced::{Alignment, Element, Length};
 
@@ -498,10 +499,13 @@ fn target_row<'a>(
             .style(style::body(palette))
     };
 
+    // A name can be a path — build output is named by where it is — and a
+    // path is one long token that the default word wrap cannot break.
     let mut labels = row![
         text(target.name.as_str())
             .size(ty::BODY)
             .style(style::body(palette))
+            .wrapping(Wrapping::WordOrGlyph)
     ]
     .spacing(ty::GAP_TIGHT)
     .align_y(Alignment::Center);
@@ -545,8 +549,6 @@ fn target_row<'a>(
             .into(),
     };
 
-    // Narrow enough and the size goes under the name instead of into a
-    // column that would leave the name two words wide.
     // Wrapped, so a long name plus two chips spills onto a second line
     // instead of pushing the size off the edge.
     let heading = labels.wrap();
@@ -561,18 +563,15 @@ fn target_row<'a>(
         .spacing(ty::GAP)
         .into()
     } else {
-        // Narrow enough and the size goes under the name instead of into a
-        // column that would leave the name two words wide.
+        // Narrow enough and everything stacks: the size on a line of its
+        // own, under the detail. Beside it, the detail shared the line with
+        // a Fill spacer, got half of it, and a sentence came out one or two
+        // words to a line.
         row![
             tick,
-            column![
-                heading,
-                row![detail, Space::new().width(Length::Fill), size]
-                    .spacing(ty::GAP_TIGHT)
-                    .align_y(Alignment::End),
-            ]
-            .spacing(3)
-            .width(Length::Fill),
+            column![heading, detail, size]
+                .spacing(3)
+                .width(Length::Fill),
         ]
         .align_y(Alignment::Start)
         .spacing(ty::GAP_TIGHT)

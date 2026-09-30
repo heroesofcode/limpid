@@ -6,6 +6,7 @@
 
 use std::path::PathBuf;
 
+use crate::guard::Permission;
 use crate::size::Size;
 
 /// What kind of thing a target is, which is what decides how it is cleaned.
@@ -110,6 +111,13 @@ pub struct Target {
     /// blocked one is not offered at all, because acting on it would fail or
     /// do damage — a browser profile whose browser is open, most of all.
     pub blocked: Option<String>,
+    /// How the guard checks these paths when they are removed.
+    ///
+    /// Almost always [`Permission::Catalogued`]. Set by the scanner that
+    /// knows why its paths are safe, and carried into the plan, so nothing
+    /// in between can choose a looser check.
+    #[serde(skip_serializing_if = "Permission::is_catalogued")]
+    pub permission: Permission,
 }
 
 impl Target {
@@ -127,6 +135,7 @@ impl Target {
             privileged: None,
             requires_idle: None,
             blocked: None,
+            permission: Permission::Catalogued,
         }
     }
 
@@ -163,6 +172,14 @@ impl Target {
     #[must_use]
     pub fn requires_idle(mut self, directory: impl Into<PathBuf>) -> Self {
         self.requires_idle = Some(directory.into());
+        self
+    }
+
+    /// Found by rule rather than by place: build output inside a project.
+    /// See [`crate::project`].
+    #[must_use]
+    pub fn build_output(mut self) -> Self {
+        self.permission = Permission::BuildOutput;
         self
     }
 

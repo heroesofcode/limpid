@@ -69,6 +69,7 @@ There is no excuse for a test that reads `$HOME`.
 | `model` | `Scan`/`Category`/`Target`. Proposals. |
 | `catalog/*` | One module per category of thing worth looking for. Scanners only measure. |
 | `browser` | Browser discovery, profiles, and whether one is running. |
+| `project` | What makes a directory build output, and finding it in projects under home. Asked by the projects scanner and again by the guard. |
 | `analyse` | The "where did it go" side: one-level breakdown and largest files. Knows nothing, finds everything. |
 | `plan` | `Plan`, `Disposal`, `Selection`. What the user agreed to. |
 | `guard` | The last check before anything is removed. See @.claude/safety.md. |

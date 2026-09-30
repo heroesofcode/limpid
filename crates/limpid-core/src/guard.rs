@@ -20,13 +20,23 @@
 //! home directory, and never something no cleaner should be touching — and
 //! drops only the boundary list.
 //!
+//! Build output inside projects is a third case. A scanner found it, so it
+//! is a guess — but no boundary list can name every project, so it cannot
+//! be held to one. It is held to a rule instead: everything an explicit
+//! choice must satisfy, plus what makes a directory build output at all
+//! ([`crate::project::identify`]), asked again here against the filesystem
+//! as it is at the moment of removal, and two rules about where build
+//! output can be that this module enforces on its own.
+//!
 //! Which check applies is not left to the call site. It travels with the
 //! work as a [`Permission`], set when the item was created and read when it
 //! is acted on.
 
+use std::os::unix::ffi::OsStrExt;
 use std::path::{Component, Path, PathBuf};
 
 use crate::paths::Roots;
+use crate::project::{self, Ecosystem};
 
 /// Why a path may not be removed.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -52,6 +62,10 @@ pub enum Refusal {
     /// Carries a name that is never removable, wherever it appears.
     #[error("{0} is protected by name")]
     Protected(PathBuf),
+    /// Was found as build output, and no longer looks like it — or is
+    /// somewhere build output is never taken from.
+    #[error("{0} is not build output inside a project")]
+    NotBuildOutput(PathBuf),
 }
 
 impl Refusal {
@@ -64,7 +78,8 @@ impl Refusal {
             | Self::IsABoundary(path)
             | Self::Symlink(path)
             | Self::Protected(path)
-            | Self::Sacred(path) => path,
+            | Self::Sacred(path)
+            | Self::NotBuildOutput(path) => path,
         }
     }
 }
@@ -117,6 +132,17 @@ pub enum Permission {
     /// The user pointed at it on screen. The boundary list does not apply,
     /// everything else does.
     Chosen,
+    /// A scanner found it by rule rather than by place: build output inside
+    /// a project. Everything an explicit choice must satisfy, and the rule
+    /// itself, checked again at the moment of removal.
+    BuildOutput,
+}
+
+impl Permission {
+    /// Whether this is the ordinary case, a path inside a boundary.
+    pub fn is_catalogued(&self) -> bool {
+        *self == Self::Catalogued
+    }
 }
 
 /// Decides whether a path may be removed.
@@ -180,7 +206,60 @@ impl Guard {
         match permission {
             Permission::Catalogued => self.check(path),
             Permission::Chosen => self.check_chosen(path),
+            Permission::BuildOutput => self.check_build_output(path),
         }
+    }
+
+    /// Check build output that a scanner found by rule.
+    ///
+    /// The rule is asked again rather than trusted: a `Cargo.toml` deleted
+    /// since the scan, or a `target` swapped for something else, and this is
+    /// no longer build output. The two rules about *where* are this
+    /// module's own, not the scanner's, so a scanner that stopped applying
+    /// them would still be refused here.
+    pub fn check_build_output(&self, path: &Path) -> Result<(), Refusal> {
+        self.check_chosen(path)?;
+        let refused = || Refusal::NotBuildOutput(path.to_owned());
+
+        let below_home = path.strip_prefix(&self.home).map_err(|_| refused())?;
+
+        // Applications keep their own state in hidden directories, and it
+        // can look exactly like a project: an application's plugins under
+        // `~/.config` came with a `package.json`, a lockfile and a
+        // `node_modules`. People do not keep projects there.
+        if below_home
+            .components()
+            .any(|part| part.as_os_str().as_bytes().starts_with(b"."))
+        {
+            return Err(refused());
+        }
+
+        // Inside a boundary, it is the catalogue's to clean, under the
+        // catalogue's rules — the Go module cache is read-only and needs its
+        // own operation, not a recursive delete.
+        if self
+            .boundaries
+            .iter()
+            .any(|boundary| path.starts_with(boundary))
+        {
+            return Err(refused());
+        }
+
+        // Nested inside other build output: a package's own
+        // `node_modules`, inside the project's. Removing it would break
+        // the install around it rather than free anything on its own.
+        let nested = below_home.parent().is_some_and(|parent| {
+            parent.components().any(|part| {
+                Ecosystem::ALL
+                    .iter()
+                    .any(|ecosystem| part.as_os_str() == ecosystem.directory())
+            })
+        });
+        if nested {
+            return Err(refused());
+        }
+
+        project::identify(path).map(|_| ()).ok_or_else(refused)
     }
 
     /// Check a path the user picked from the storage view.
@@ -555,6 +634,111 @@ mod tests {
                 .is_err()
         );
         assert!(guard.check_with(&roots.cache, Permission::Chosen).is_ok());
+    }
+
+    #[test]
+    fn build_output_in_a_project_is_allowed_where_nothing_else_a_scanner_found_would_be() {
+        let (_fixture, roots, guard) = fixture();
+        let target = crate::project::fixture::cargo_project(&roots.home("Work/limpid"), 10);
+
+        assert!(matches!(guard.check(&target), Err(Refusal::OutOfBounds(_))));
+        assert!(guard.check_with(&target, Permission::BuildOutput).is_ok());
+    }
+
+    #[test]
+    fn build_output_is_asked_for_again_at_the_moment_of_removal() {
+        let (_fixture, roots, guard) = fixture();
+        let project = roots.home("Work/limpid");
+        let target = crate::project::fixture::cargo_project(&project, 10);
+
+        // Between the scan and the button, the project stopped being one.
+        std::fs::remove_file(project.join("Cargo.toml")).unwrap();
+
+        assert_eq!(
+            guard.check_build_output(&target).unwrap_err(),
+            Refusal::NotBuildOutput(target)
+        );
+    }
+
+    #[test]
+    fn build_output_under_a_hidden_directory_is_refused_even_when_it_looks_right() {
+        let (_fixture, roots, guard) = fixture();
+
+        for place in [".config/opencode", ".local/share/tool", "Work/.hidden/app"] {
+            let modules = crate::project::fixture::npm_project(&roots.home(place), 10);
+            assert_eq!(
+                guard.check_build_output(&modules).unwrap_err(),
+                Refusal::NotBuildOutput(modules),
+                "{place}",
+            );
+        }
+    }
+
+    #[test]
+    fn build_output_nested_in_other_build_output_is_refused() {
+        let (_fixture, roots, guard) = fixture();
+        let outer = crate::project::fixture::npm_project(&roots.home("Work/site"), 10);
+        let inner = crate::project::fixture::npm_project(&outer.join("some-package"), 10);
+
+        assert!(guard.check_build_output(&outer).is_ok());
+        assert_eq!(
+            guard.check_build_output(&inner).unwrap_err(),
+            Refusal::NotBuildOutput(inner)
+        );
+    }
+
+    #[test]
+    fn build_output_inside_a_catalogued_boundary_is_left_to_the_catalogue() {
+        let (_fixture, roots, guard) = fixture();
+        let target =
+            crate::project::fixture::cargo_project(&roots.home("go/pkg/mod/github.com/x/y"), 10);
+
+        assert!(guard.allows(&target), "the catalogue may clean it");
+        assert_eq!(
+            guard.check_build_output(&target).unwrap_err(),
+            Refusal::NotBuildOutput(target)
+        );
+    }
+
+    #[test]
+    fn build_output_keeps_every_rule_an_explicit_choice_has() {
+        let (_fixture, roots, guard) = fixture();
+        let real = crate::project::fixture::cargo_project(&roots.home("Work/real"), 10);
+
+        // A project directory that is a link somewhere else.
+        std::os::unix::fs::symlink(roots.home("Work/real"), roots.home("Work/alias")).unwrap();
+        assert!(matches!(
+            guard.check_build_output(&roots.home("Work/alias/target")),
+            Err(Refusal::Symlink(_))
+        ));
+
+        // Outside the home directory, and climbing out of it.
+        assert!(matches!(
+            guard.check_build_output(Path::new("/opt/project/target")),
+            Err(Refusal::OutOfBounds(_))
+        ));
+        assert!(matches!(
+            guard.check_build_output(&roots.home("Work/real/../../../target")),
+            Err(Refusal::Climbing(_))
+        ));
+
+        // And the real one is still fine.
+        assert!(guard.check_build_output(&real).is_ok());
+    }
+
+    #[test]
+    fn a_directory_that_merely_has_the_name_is_refused() {
+        let (_fixture, roots, guard) = fixture();
+        let directory = roots.home("Documents/target");
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("plans.odt"), "x").unwrap();
+
+        assert_eq!(
+            guard
+                .check_with(&directory, Permission::BuildOutput)
+                .unwrap_err(),
+            Refusal::NotBuildOutput(directory)
+        );
     }
 
     #[test]

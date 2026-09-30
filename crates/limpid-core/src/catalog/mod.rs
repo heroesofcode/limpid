@@ -14,6 +14,7 @@ pub mod caches;
 pub mod development;
 pub mod logs;
 pub mod packages;
+pub mod projects;
 pub mod trash;
 
 /// Everything a scanner needs to know.
@@ -105,6 +106,7 @@ pub fn scan(context: &Context) -> Scan {
             caches::scan(context),
             packages::scan(context),
             development::scan(context),
+            projects::scan(context),
             logs::scan(context),
             trash::scan(context),
         ],
