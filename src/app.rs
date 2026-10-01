@@ -194,8 +194,9 @@ pub struct Storage {
     pub checked_large: bool,
     /// Whether a removal is under way.
     pub removing: bool,
-    /// What the last removal from this page did.
-    pub outcome: Option<Outcome>,
+    /// What the last removal from this page did, and whether it went to the
+    /// trash — which says whether the space has actually come back.
+    pub outcome: Option<(Disposal, Outcome)>,
     /// What was just excluded from this page.
     pub excluded: Option<Excluded>,
     /// Which walk the result on screen belongs to.
@@ -228,17 +229,42 @@ impl Storage {
             return Vec::new();
         };
 
-        survey
+        let chosen = survey
             .breakdown
             .children
             .iter()
             .chain(&survey.largest)
-            .filter(|entry| !entry.is_dir && self.selected.contains(&entry.path))
+            .filter(|entry| self.selected.contains(&entry.path))
             .map(|entry| (entry.path.clone(), entry.size))
             // The same file can appear in both lists.
-            .collect::<std::collections::BTreeMap<_, _>>()
-            .into_iter()
+            .collect::<BTreeMap<_, _>>();
+
+        // A file inside a ticked folder already goes with it. Counted again
+        // it would inflate the figure; listed again it would be a second
+        // line for one thing in the confirmation.
+        chosen
+            .iter()
+            .filter(|(path, _)| {
+                !chosen
+                    .keys()
+                    .any(|other| other != *path && path.starts_with(other))
+            })
+            .map(|(path, size)| (path.clone(), *size))
             .collect()
+    }
+
+    /// Whether a folder is among what is ticked.
+    ///
+    /// Folders go to the trash and nowhere else until there is a history of
+    /// what was removed, so this is what takes "Delete" off the table.
+    pub fn has_folders(&self) -> bool {
+        self.survey.as_ref().is_some_and(|survey| {
+            survey
+                .breakdown
+                .children
+                .iter()
+                .any(|entry| entry.is_dir && self.selected.contains(&entry.path))
+        })
     }
 
     /// What acting on the current selection would do.
@@ -339,8 +365,8 @@ pub enum Message {
     CancelDelete,
     /// Remove the ticked files outright.
     DeleteSelected,
-    /// A removal from the storage page finished.
-    SelectionRemoved(Box<Outcome>),
+    /// A removal from the storage page finished, and how it was done.
+    SelectionRemoved(Disposal, Box<Outcome>),
     /// Nothing happened worth reacting to.
     Nothing,
     /// Show a file in the desktop's file manager.
@@ -520,7 +546,7 @@ impl State {
                 .await
                 .unwrap_or_default()
             },
-            |outcome| Message::SelectionRemoved(Box::new(outcome)),
+            move |outcome| Message::SelectionRemoved(disposal, Box::new(outcome)),
         )
     }
 
@@ -625,7 +651,8 @@ impl State {
                 Task::none()
             }
             Message::AskToDelete => {
-                self.storage.confirming_delete = !self.storage.plan(Disposal::Delete).is_empty();
+                self.storage.confirming_delete =
+                    !self.storage.has_folders() && !self.storage.plan(Disposal::Delete).is_empty();
                 // Asked every time it opens: a tick given for one list is
                 // not a tick for the next.
                 self.storage.checked_large = false;
@@ -645,7 +672,11 @@ impl State {
             Message::DeleteSelected => {
                 // Refused here and not only by a greyed-out button: the
                 // button is how it is usually asked for, not the only way.
-                if self.storage.magnitude().is_some() && !self.storage.checked_large {
+                // The executor refuses a folder too; this is the earlier,
+                // quieter no.
+                if self.storage.has_folders()
+                    || (self.storage.magnitude().is_some() && !self.storage.checked_large)
+                {
                     return Task::none();
                 }
                 self.storage.checked_large = false;
@@ -667,8 +698,8 @@ impl State {
             }
             Message::CopyPath(path) => iced::clipboard::write(path.display().to_string()),
             Message::Nothing => Task::none(),
-            Message::SelectionRemoved(outcome) => {
-                self.storage.outcome = Some(*outcome);
+            Message::SelectionRemoved(disposal, outcome) => {
+                self.storage.outcome = Some((disposal, *outcome));
                 self.storage.selected.clear();
                 self.storage.removing = false;
                 // Measure again rather than adjust: the figures on screen
@@ -1666,7 +1697,7 @@ mod tests {
         let _ = state.update(Message::ToggleFile(PathBuf::from("/home/x/big.iso")));
         let _ = state.update(Message::TrashSelected);
 
-        let task = state.update(Message::SelectionRemoved(Box::default()));
+        let task = state.update(Message::SelectionRemoved(Disposal::Trash, Box::default()));
 
         assert!(state.storage().selected.is_empty());
         assert!(state.storage().outcome.is_some());
@@ -1675,12 +1706,77 @@ mod tests {
     }
 
     #[test]
-    fn a_directory_is_never_part_of_a_selection_plan() {
-        // Directories have no checkbox, and nothing else may put one in.
+    fn a_folder_can_go_to_the_trash_but_is_never_offered_for_deletion() {
+        let (mut state, _dir) = state_on_storage();
+        let videos = PathBuf::from("/home/x/Videos");
+        let _ = state.update(Message::ToggleFile(videos.clone()));
+
+        let plan = state.storage().plan(Disposal::Trash);
+        assert_eq!(plan.items.len(), 1);
+        assert_eq!(plan.items[0].paths, [videos]);
+
+        // Not asked about, and not done if asked anyway.
+        let _ = state.update(Message::AskToDelete);
+        assert!(!state.storage().confirming_delete);
+        let _ = state.update(Message::DeleteSelected);
+        assert!(!state.storage().removing);
+
+        // Trashing it acts at once, like a file.
+        let _ = state.update(Message::TrashSelected);
+        assert!(state.storage().removing);
+    }
+
+    #[test]
+    fn a_file_inside_a_ticked_folder_is_not_counted_twice() {
+        use limpid_core::analyse::{Breakdown, Entry, Survey};
+
+        let (mut state, _dir) = boot();
+        let entry = |path: &str, is_dir: bool, bytes: u64| Entry {
+            path: PathBuf::from(path),
+            name: path.rsplit('/').next().unwrap().to_owned(),
+            size: Size::new(bytes, bytes),
+            files: 1,
+            is_dir,
+        };
+        let _ = state.update(Message::Explore(PathBuf::from("/home/x/Downloads")));
+        let generation = state.storage().generation;
+        let _ = state.update(Message::Explored(
+            generation,
+            Box::new(Survey {
+                breakdown: Breakdown {
+                    children: vec![entry("/home/x/Downloads/course", true, 1000)],
+                    ..Breakdown::default()
+                },
+                largest: vec![entry(
+                    "/home/x/Downloads/course/week-01/lecture.mp4",
+                    false,
+                    900,
+                )],
+            }),
+        ));
+
+        let _ = state.update(Message::ToggleFile(PathBuf::from(
+            "/home/x/Downloads/course",
+        )));
+        let _ = state.update(Message::ToggleFile(PathBuf::from(
+            "/home/x/Downloads/course/week-01/lecture.mp4",
+        )));
+
+        let plan = state.storage().plan(Disposal::Trash);
+        assert_eq!(plan.items.len(), 1);
+        assert_eq!(plan.expected().on_disk, 1000);
+    }
+
+    #[test]
+    fn a_mixed_selection_is_not_offered_for_deletion_either() {
         let (mut state, _dir) = state_on_storage();
         let _ = state.update(Message::ToggleFile(PathBuf::from("/home/x/Videos")));
+        let _ = state.update(Message::ToggleFile(PathBuf::from("/home/x/big.iso")));
 
-        assert!(state.storage().plan(Disposal::Trash).is_empty());
+        let _ = state.update(Message::AskToDelete);
+
+        assert!(state.storage().has_folders());
+        assert!(!state.storage().confirming_delete);
     }
 
     #[test]

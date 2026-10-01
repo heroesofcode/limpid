@@ -65,13 +65,16 @@ pub fn view<'a>(palette: Palette, metrics: Metrics, state: &'a State) -> Element
         body = body.push(view::failed(palette, metrics, why));
     }
 
-    if let Some(outcome) = &storage.outcome {
-        body = body.push(result(palette, metrics, outcome));
+    if let Some((disposal, outcome)) = &storage.outcome {
+        body = body.push(result(palette, metrics, *disposal, outcome));
     }
 
     if storage.confirming_delete {
         body = body.push(confirmation(palette, metrics, state));
-    } else if !storage.selected.is_empty() {
+    } else if !storage.plan(Disposal::Trash).is_empty() {
+        // The plan rather than the ticks: a ticked file that has gone from
+        // the disk since leaves a tick and nothing to act on, and a bar
+        // saying "0 selected" offers buttons that do nothing.
         body = body.push(action_bar(
             palette,
             metrics,
@@ -223,10 +226,18 @@ fn action_bar<'a>(
     writable: bool,
 ) -> Element<'a, Message> {
     let plan = storage.plan(Disposal::Trash);
+    let folders = storage.has_folders();
     let summary = format!(
-        "{} selected, {}",
+        "{} selected, {}{}",
         plan.items.len(),
-        human(plan.expected().on_disk)
+        human(plan.expected().on_disk),
+        // Said where the choice is made, rather than discovered as a
+        // greyed-out button with no reason given.
+        if folders {
+            ". Folders only go to the trash for now"
+        } else {
+            ""
+        },
     );
 
     let mut quiet: Vec<Choice<'a>> = vec![("Clear", Some(Message::ClearSelection))];
@@ -242,7 +253,7 @@ fn action_bar<'a>(
     }
 
     quiet.push(("Exclude", writable.then_some(Message::ExcludeFiles)));
-    quiet.push(("Delete", Some(Message::AskToDelete)));
+    quiet.push(("Delete", (!folders).then_some(Message::AskToDelete)));
 
     // Trash is the primary action because it is the reversible one, and it
     // acts directly for the same reason. A confirmation whose consequence is
@@ -364,7 +375,12 @@ fn confirmation<'a>(palette: Palette, metrics: Metrics, state: &State) -> Elemen
 }
 
 /// What the last removal from this page did.
-fn result<'a>(palette: Palette, metrics: Metrics, outcome: &Outcome) -> Element<'a, Message> {
+fn result<'a>(
+    palette: Palette,
+    metrics: Metrics,
+    disposal: Disposal,
+    outcome: &Outcome,
+) -> Element<'a, Message> {
     let line = |good: bool, said: String| {
         row![
             text(if good { "\u{2713}" } else { "\u{2717}" })
@@ -382,16 +398,23 @@ fn result<'a>(palette: Palette, metrics: Metrics, outcome: &Outcome) -> Element<
         .spacing(ty::GAP_TIGHT)
     };
 
-    let mut body = column![line(
-        true,
-        format!(
+    // The trash is a rename on the same disk, so nothing is freed until it
+    // is emptied. Saying "removed" there would be saying the space came back
+    // when it has not.
+    let said = match disposal {
+        Disposal::Trash => format!(
+            "Moved {} to the trash, across {} files. The space comes back once the \
+             trash is emptied.",
+            human(outcome.reclaimed.on_disk),
+            outcome.files,
+        ),
+        Disposal::Delete => format!(
             "Removed {} across {} files.",
             human(outcome.reclaimed.on_disk),
             outcome.files
         ),
-    )]
-    .spacing(6)
-    .width(Length::Fill);
+    };
+    let mut body = column![line(true, said)].spacing(6).width(Length::Fill);
 
     for problem in &outcome.problems {
         body = body.push(line(false, problem.to_string()));
@@ -443,19 +466,19 @@ fn file_actions<'a>(
     )
 }
 
-/// A checkbox for a file, or the space one would take.
+/// A checkbox for a file or a folder, or the space one would take.
 ///
-/// Directories get the space, not a tick: removing a whole tree is a far
-/// larger blast radius and waits for an undo. So does anything excluded —
-/// the executor would refuse it, and a tick that can only produce a refusal
-/// is a question with one answer.
+/// Folders can be ticked, and go to the trash whole; deleting one outright
+/// waits for a history of what was removed. Anything excluded gets the
+/// space instead — the executor would refuse it, and a tick that can only
+/// produce a refusal is a question with one answer.
 fn tick<'a>(
     palette: Palette,
     storage: &Storage,
     exclusions: &Exclusions,
     entry: &Entry,
 ) -> Element<'a, Message> {
-    if entry.is_dir || exclusions.covers(&entry.path) {
+    if exclusions.covers(&entry.path) {
         return tick_spacer();
     }
 

@@ -559,7 +559,7 @@ fn report_clean(out: &mut impl Write, shown: &Shown, colour: bool) -> io::Result
         let label = match problem {
             Problem::InUse { .. } => "in use",
             Problem::Excluded(_) => "excluded",
-            Problem::Refused(_) => "refused",
+            Problem::Refused(_) | Problem::FolderNotDeleted(_) => "refused",
             Problem::Failed { .. } => "failed",
         };
         writeln!(out, "{} {problem}", style.paint("31", label))?;

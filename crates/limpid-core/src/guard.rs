@@ -62,6 +62,9 @@ pub enum Refusal {
     /// Carries a name that is never removable, wherever it appears.
     #[error("{0} is protected by name")]
     Protected(PathBuf),
+    /// Is, or contains, a directory the desktop session lives in.
+    #[error("{0} holds what your desktop runs on; Limpid does not remove it")]
+    Essential(PathBuf),
     /// Was found as build output, and no longer looks like it — or is
     /// somewhere build output is never taken from.
     #[error("{0} is not build output inside a project")]
@@ -79,6 +82,7 @@ impl Refusal {
             | Self::Symlink(path)
             | Self::Protected(path)
             | Self::Sacred(path)
+            | Self::Essential(path)
             | Self::NotBuildOutput(path) => path,
         }
     }
@@ -152,6 +156,9 @@ pub struct Guard {
     boundaries: Vec<PathBuf>,
     /// The user's home directory, which bounds an explicit choice.
     home: PathBuf,
+    /// Directories the desktop session lives in, which no explicit choice
+    /// may be or contain.
+    essential: Vec<PathBuf>,
 }
 
 impl Guard {
@@ -192,6 +199,17 @@ impl Guard {
         Self {
             boundaries,
             home: roots.home.clone(),
+            // Where every application keeps its settings and its data. Each
+            // of these going to the trash is reversible on paper and a
+            // broken session in practice: the window manager reads its
+            // configuration from the first one, and the file manager you
+            // would restore it with keeps its state in the others. `~/.local`
+            // is covered too, because it contains two of them.
+            essential: vec![
+                roots.config.clone(),
+                roots.data.clone(),
+                roots.state.clone(),
+            ],
         }
     }
 
@@ -280,6 +298,17 @@ impl Guard {
             .any(|sacred| path.starts_with(self.home.join(sacred)))
         {
             return Err(Refusal::Sacred(path.to_owned()));
+        }
+
+        // A folder that holds one of them. Something inside is a different
+        // matter — one application's leftovers under `~/.config` are a
+        // reasonable thing to point at.
+        if self
+            .essential
+            .iter()
+            .any(|essential| essential.starts_with(path))
+        {
+            return Err(Refusal::Essential(path.to_owned()));
         }
 
         Ok(())
@@ -614,6 +643,30 @@ mod tests {
             guard.check_chosen(&roots.home("Videos/Local State")),
             Err(Refusal::Protected(_))
         ));
+    }
+
+    #[test]
+    fn a_folder_the_session_lives_in_cannot_be_chosen_nor_anything_holding_one() {
+        let (_fixture, roots, guard) = fixture();
+
+        for path in [
+            roots.config.clone(),
+            roots.data.clone(),
+            roots.state.clone(),
+            roots.home(".local"),
+        ] {
+            assert_eq!(
+                guard.check_chosen(&path).unwrap_err(),
+                Refusal::Essential(path.clone()),
+                "{}",
+                path.display(),
+            );
+        }
+
+        // What is inside is the person's to point at: an uninstalled
+        // application's leftovers, one setting file.
+        assert!(guard.check_chosen(&roots.config("someapp")).is_ok());
+        assert!(guard.check_chosen(&roots.data("Steam/logs")).is_ok());
     }
 
     #[test]
