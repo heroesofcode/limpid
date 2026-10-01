@@ -128,14 +128,30 @@ Scanning for projects walks every non-hidden directory under home. On the
 reference machine the whole scan went from 0.23 s to about 1 s, most of it
 measuring 21.6 GiB of `target/`.
 
-### Directories in the storage view, to the trash
+### Directories in the storage view, to the trash — done
 
-Trash only. Trashing a directory on the same filesystem is a rename, so it is
-instant and restored from the file manager like any other; the reversibility
-comes from the trash, not from an undo Limpid would add. Deleting a directory
-*permanently* is the larger blast radius, and that waits for history in 0.5.
-The confirmation says, in those words, that trashed space comes back only
-when the trash is emptied.
+Folders can be ticked in the storage view and go to the trash **whole**; the
+executor used to empty every directory it was given, which would have trashed
+a folder entry by entry and left it standing empty. Trashing a directory on
+the same filesystem is a rename, so it is instant and restored from the file
+manager like any other; the reversibility comes from the trash, not from an
+undo Limpid would add.
+
+Deleting a folder *permanently* waits for history in 0.5: not offered while
+one is ticked, and refused by the executor if asked anyway. After trashing,
+the result says the space comes back once the trash is emptied, rather than
+"removed".
+
+Two things this made necessary. A folder that is or holds `~/.config`,
+`~/.local/share` or `~/.local/state` cannot be chosen at all — with folders,
+one tick could otherwise break the session. And a file inside a ticked
+folder is not counted or listed a second time.
+
+Verified end to end, with the trash redirected to a fixture through
+`XDG_DATA_HOME`: the folder arrived whole with its `.trashinfo`, and the real
+trash was untouched. The `trash` crate follows `XDG_DATA_HOME` and nothing
+else, so `--root` alone does **not** keep trashed files out of the real
+trash; a test that applies the trash would put things in the developer's.
 
 ### Before acting, and before releasing
 

@@ -12,6 +12,7 @@ use limpid_core::analyse::Entry;
 use limpid_core::size::human;
 use limpid_theme::{Color, Palette};
 
+use crate::layout;
 use crate::style::{faded, to_iced};
 
 /// Gap between tiles.
@@ -182,7 +183,7 @@ impl<Message: Clone + 'static> canvas::Program<Message> for Treemap<Message> {
             }
 
             frame.fill_text(Text {
-                content: tile.label,
+                content: one_line(&tile.label, inner.width - 16.0, 12.0),
                 position: Point::new(inner.x + 8.0, inner.y + 6.0),
                 color: to_iced(self.palette.bright_foreground),
                 size: 12.0.into(),
@@ -318,6 +319,22 @@ fn aspect(short: f64, row: f64, largest: f64, smallest: f64) -> f64 {
     wide.max(tall)
 }
 
+/// A label cut to one line, with an ellipsis when it had to be cut.
+///
+/// One line because the size is drawn under it at a fixed height, and a name
+/// that wrapped ran straight over its own figure. The whole name is in the
+/// list under the map.
+fn one_line(label: &str, max_width: f32, size: f32) -> String {
+    if layout::text_width(label, size) <= max_width {
+        return label.to_owned();
+    }
+    let per_glyph = layout::text_width("x", size);
+    let room = ((max_width / per_glyph).floor() as usize).saturating_sub(1);
+    let mut cut: String = label.chars().take(room).collect();
+    cut.push('\u{2026}');
+    cut
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -414,5 +431,25 @@ mod tests {
 
         assert!((placed[0].width - AREA.width).abs() < 0.01);
         assert!((placed[0].height - AREA.height).abs() < 0.01);
+    }
+
+    #[test]
+    fn a_name_too_long_for_its_tile_is_cut_rather_than_wrapped_over_its_size() {
+        let name = "Final Fantasy X (www.romsportugues.com).iso";
+        let cut = one_line(name, 120.0, 12.0);
+
+        assert!(cut.ends_with('\u{2026}'), "{cut}");
+        assert!(layout::text_width(&cut, 12.0) <= 120.0, "{cut}");
+        assert!(name.starts_with(cut.trim_end_matches('\u{2026}')));
+    }
+
+    #[test]
+    fn a_name_that_fits_is_left_alone() {
+        assert_eq!(one_line("Videos", 120.0, 12.0), "Videos");
+    }
+
+    #[test]
+    fn a_tile_with_no_room_still_gets_something_rather_than_a_panic() {
+        assert_eq!(one_line("Downloads", 0.0, 12.0), "\u{2026}");
     }
 }

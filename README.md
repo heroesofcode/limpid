@@ -90,6 +90,12 @@ view knows nothing and finds everything, which is what you want when the
 space went somewhere nobody anticipated. Area is proportional to occupied
 size; clicking descends.
 
+Files and folders can be ticked there. They go to the trash by default, a
+folder whole, so it comes back whole; a file can be deleted outright behind
+a second confirmation, a folder cannot yet. A folder that holds your desktop's
+settings — `~/.config`, `~/.local/share`, `~/.local/state` — cannot be
+chosen at all.
+
 ![The storage view](docs/storage.png)
 
 ## Using it

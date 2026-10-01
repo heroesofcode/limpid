@@ -84,10 +84,21 @@ Rules for anything touching this boundary:
   freedesktop trash.**
 - The confirmation says which, in those words. `Disposal::describe`.
 
-## 5. Directories are emptied, not removed
+## 5. Directories are emptied, not removed — unless a person chose them
 
 Applications expect their cache directory to exist and misbehave quietly when
-it does not. An empty directory costs nothing.
+it does not. An empty directory costs nothing. That holds for everything a
+scanner found, build output included.
+
+A folder the person ticked in the storage view is the opposite case, and goes
+whole (`Reach` in `execute.rs`, decided by the item's permission). It is one
+thing to them, and the trash restores it as one thing; emptied, it would come
+back an entry at a time, with an empty folder left behind to explain.
+
+And it goes **only to the trash**. The executor refuses to delete a chosen
+folder outright (`Problem::FolderNotDeleted`), and the storage view does not
+offer it — a whole tree is a far larger thing to lose than a file, and until
+there is a history of what was removed, the trash is the only way back.
 
 ## 6. Some files are protected by name, wherever they appear
 
@@ -175,6 +186,15 @@ guess, so that list is dropped — and only that. Absolute, no `..`, no symlink
 anywhere along the path, no protected name, inside the home directory and not
 the home directory itself, never `~/.ssh`, `~/.gnupg`, `~/.password-store`
 or the keyrings.
+
+Nor anything that **is or contains** a directory the desktop session lives in
+— the XDG config, data and state directories, and so `~/.local` too
+(`Refusal::Essential`). With files only, the worst one choice could do was one
+file; with folders, `~/.config` could be ticked and trashed. Reversible on
+paper, a broken session in practice: the window manager reads its
+configuration from there, and the file manager you would restore it with
+keeps its state in the others. What is *inside* them stays choosable — one
+uninstalled application's leftovers are a reasonable thing to point at.
 
 ## 12. Build output is found by a rule, and the rule is asked again
 

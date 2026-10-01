@@ -5,14 +5,16 @@
 //! was built — the world can change in between. And the default is a dry
 //! run, so the destructive path is one a caller has to ask for by name.
 //!
-//! Directories are emptied rather than removed. Applications expect their
-//! cache directory to exist and quietly misbehave when it does not, and an
-//! empty directory costs nothing.
+//! Directories a scanner found are emptied rather than removed. Applications
+//! expect their cache directory to exist and quietly misbehave when it does
+//! not, and an empty directory costs nothing. A folder the person chose is
+//! the opposite case: it is one thing to them, so it goes whole — and, for
+//! now, only to the trash.
 
 use std::path::{Path, PathBuf};
 
 use crate::config::Exclusions;
-use crate::guard::{Guard, Refusal};
+use crate::guard::{Guard, Permission, Refusal};
 use crate::paths::Roots;
 use crate::plan::{Disposal, Item, Plan};
 use crate::size::Size;
@@ -33,6 +35,11 @@ pub enum Problem {
     /// exclusion, and the person who pressed the button should hear that
     /// part of it was not done.
     Excluded(PathBuf),
+    /// A folder the person chose, asked to be deleted outright. Folders go
+    /// to the trash until Limpid keeps a history of what it removed: a
+    /// whole tree is a far larger thing to lose than a file, and the trash
+    /// is the only way back there is today.
+    FolderNotDeleted(PathBuf),
     /// The guard would not allow it.
     Refused(Refusal),
     /// The filesystem would not allow it.
@@ -58,6 +65,11 @@ impl std::fmt::Display for Problem {
                     path.display()
                 )
             }
+            Self::FolderNotDeleted(path) => write!(
+                formatter,
+                "{} is a folder, and folders only go to the trash for now",
+                path.display()
+            ),
             Self::Refused(refusal) => write!(formatter, "{refusal}"),
             Self::Failed { path, reason } => write!(formatter, "{}: {reason}", path.display()),
         }
@@ -88,6 +100,29 @@ impl Outcome {
         self.reclaimed += other.reclaimed;
         self.files += other.files;
         self.problems.extend(other.problems);
+    }
+}
+
+/// How much of a path an item takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    /// Everything inside it, leaving the directory itself — what a scanner
+    /// found, which an application expects to keep existing.
+    Contents,
+    /// The path itself — what a person pointed at. A folder trashed whole
+    /// is restored whole; emptied, it would come back one entry at a time,
+    /// with an empty folder left behind to explain.
+    Whole,
+}
+
+impl Reach {
+    /// Decided by how the path came to be in the plan, not by the call
+    /// site, for the same reason the guard's check is.
+    fn of(permission: Permission) -> Self {
+        match permission {
+            Permission::Catalogued | Permission::BuildOutput => Self::Contents,
+            Permission::Chosen => Self::Whole,
+        }
     }
 }
 
@@ -193,7 +228,20 @@ impl Executor {
                 continue;
             }
 
-            outcome.absorb(self.empty(path, item.disposal));
+            match Reach::of(item.permission) {
+                Reach::Contents => outcome.absorb(self.empty(path, item.disposal)),
+                Reach::Whole => {
+                    let is_folder =
+                        std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir());
+                    if is_folder && item.disposal == Disposal::Delete {
+                        outcome
+                            .problems
+                            .push(Problem::FolderNotDeleted(path.clone()));
+                        continue;
+                    }
+                    outcome.absorb(self.clear(path, item.disposal));
+                }
+            }
         }
 
         outcome
@@ -535,6 +583,76 @@ mod tests {
 
         assert!(outcome.is_clean(), "{:?}", outcome.problems);
         assert!(!film.exists());
+    }
+
+    #[test]
+    fn a_chosen_folder_is_never_deleted_outright() {
+        let fixture = tempfile::tempdir().unwrap();
+        let roots = Roots::under(fixture.path());
+        let folder = roots.home("Downloads/old-project");
+        write(&folder.join("notes.txt"), 100);
+        write(&folder.join("src/main.rs"), 100);
+
+        let plan = Plan::from_chosen(
+            [(folder.clone(), Size::new(200, 200))],
+            crate::plan::Disposal::Delete,
+        );
+        let outcome = Executor::applying(&roots).run(&plan);
+
+        assert_eq!(
+            outcome.problems,
+            [Problem::FolderNotDeleted(folder.clone())]
+        );
+        assert!(folder.join("notes.txt").exists());
+        assert!(folder.join("src/main.rs").exists());
+    }
+
+    #[test]
+    fn what_a_person_chose_goes_whole_and_what_a_scanner_found_is_emptied() {
+        // Applying the trash for real would use the trash of whoever runs
+        // the tests, so the decision is held to directly; the dry run below
+        // shows the whole folder is what gets measured.
+        assert_eq!(Reach::of(Permission::Chosen), Reach::Whole);
+        assert_eq!(Reach::of(Permission::Catalogued), Reach::Contents);
+        assert_eq!(Reach::of(Permission::BuildOutput), Reach::Contents);
+    }
+
+    #[test]
+    fn trashing_a_chosen_folder_is_previewed_as_everything_in_it() {
+        let fixture = tempfile::tempdir().unwrap();
+        let roots = Roots::under(fixture.path());
+        let folder = roots.home("Downloads/old-project");
+        write(&folder.join("notes.txt"), 4096);
+        write(&folder.join("src/main.rs"), 4096);
+
+        let plan = Plan::from_chosen(
+            [(folder.clone(), Size::new(8192, 8192))],
+            crate::plan::Disposal::Trash,
+        );
+        let outcome = Executor::dry_run(&roots).run(&plan);
+
+        assert!(outcome.is_clean(), "{:?}", outcome.problems);
+        assert_eq!(outcome.files, 2);
+        assert!(outcome.reclaimed.apparent >= 8192);
+        assert!(folder.join("notes.txt").exists(), "a dry run takes nothing");
+    }
+
+    #[test]
+    fn the_folder_a_desktop_keeps_its_settings_in_cannot_be_trashed() {
+        let fixture = tempfile::tempdir().unwrap();
+        let roots = Roots::under(fixture.path());
+        write(&roots.config("hypr/hyprland.conf"), 100);
+
+        let plan = Plan::from_chosen(
+            [(roots.config.clone(), Size::new(100, 100))],
+            crate::plan::Disposal::Trash,
+        );
+        let outcome = Executor::dry_run(&roots).run(&plan);
+
+        assert!(matches!(
+            outcome.problems.as_slice(),
+            [Problem::Refused(Refusal::Essential(_))]
+        ));
     }
 
     #[test]
