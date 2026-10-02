@@ -128,6 +128,11 @@ fn remove_coredumps() -> Result<String, String> {
 /// `is_file` is false for it. Split out from [`remove_coredumps`] only so
 /// that this is tested rather than asserted: the project roadmap once
 /// claimed the opposite, from a reading of an older comment here.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the helper's only removal: regular files directly inside a \
+              directory fixed at compile time, with links skipped"
+)]
 fn remove_files_in(directory: &Path) -> Result<String, String> {
     let entries = match std::fs::read_dir(directory) {
         Ok(entries) => entries,
@@ -164,6 +169,11 @@ fn remove_files_in(directory: &Path) -> Result<String, String> {
 }
 
 /// Run a command and collect what it said.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "runs only the programs `perform` names as constants, with the \
+              environment cleared and PATH fixed before anything starts"
+)]
 fn run(program: &str, arguments: &[&str]) -> Result<String, String> {
     let output = Command::new(program)
         .args(arguments)

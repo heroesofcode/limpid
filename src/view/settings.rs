@@ -159,7 +159,6 @@ fn cleaning<'a>(palette: Palette, metrics: Metrics, store: &Store) -> Element<'a
 }
 
 /// One setting with its explanation and a stepper.
-#[allow(clippy::too_many_arguments)]
 fn setting<'a>(
     palette: Palette,
     metrics: Metrics,

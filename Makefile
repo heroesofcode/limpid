@@ -15,7 +15,7 @@ LICENSEDIR = $(DESTDIR)$(PREFIX)/share/licenses/limpid
 
 TARGET = target/release
 
-.PHONY: all build install uninstall check clean
+.PHONY: all build install uninstall check audit clean
 
 all: build
 
@@ -26,6 +26,14 @@ check:
 	cargo fmt --all --check
 	cargo clippy --workspace --all-targets --all-features -- -D warnings
 	cargo test --workspace
+
+# What CI checks beyond `check`: the supply-chain policy in deny.toml,
+# spelling, and dependencies declared but never used. Needs the three tools:
+# `cargo binstall cargo-deny cargo-machete typos-cli`.
+audit:
+	cargo deny --locked check
+	cargo machete
+	typos
 
 install:
 	install -Dm755 $(TARGET)/limpid      $(BINDIR)/limpid

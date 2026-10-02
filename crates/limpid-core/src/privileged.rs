@@ -276,6 +276,12 @@ impl Runner {
             return Err(RunError::Sandboxed);
         }
 
+        #[expect(
+            clippy::disallowed_methods,
+            reason = "the one way across the privilege boundary: pkexec, or \
+                      the helper itself when already root, given a request \
+                      that has just been validated"
+        )]
         let mut command = if self.elevate {
             let mut command = Command::new("pkexec");
             command.arg(&self.helper);
