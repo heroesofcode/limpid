@@ -92,20 +92,21 @@ impl FromStr for Color {
     fn from_str(text: &str) -> Result<Self, Self::Err> {
         let digits = text.trim().strip_prefix('#').unwrap_or(text.trim());
 
-        let parse = |slice: &str| u8::from_str_radix(slice, 16).ok();
-        let double = |slice: &str| u8::from_str_radix(slice, 16).ok().map(|v| v * 17);
+        // `get` rather than indexing. The length that picks the branch is in
+        // bytes, and a theme file can hold `#a€bc`: six bytes, with a
+        // character boundary the fixed slices would land inside. Indexing
+        // panics there; `get` declines, and a declined slice is just another
+        // value that is not a colour.
+        let parse = |range| {
+            digits
+                .get(range)
+                .and_then(|slice| u8::from_str_radix(slice, 16).ok())
+        };
+        let double = |range| parse(range).map(|v| v * 17);
 
         let parsed = match digits.len() {
-            6 => (
-                parse(&digits[0..2]),
-                parse(&digits[2..4]),
-                parse(&digits[4..6]),
-            ),
-            3 => (
-                double(&digits[0..1]),
-                double(&digits[1..2]),
-                double(&digits[2..3]),
-            ),
+            6 => (parse(0..2), parse(2..4), parse(4..6)),
+            3 => (double(0..1), double(1..2), double(2..3)),
             _ => (None, None, None),
         };
 
@@ -145,6 +146,16 @@ mod tests {
             "#abc".parse::<Color>().unwrap(),
             Color::rgb(0xaa, 0xbb, 0xcc)
         );
+    }
+
+    #[test]
+    fn a_value_whose_byte_length_matches_is_refused_rather_than_sliced_mid_character() {
+        // The length that picks the branch is in bytes. `€` is three of them,
+        // so each of these has the right length and a character boundary that
+        // the fixed slices land inside — which panicked, from a theme file.
+        for text in ["#a€bc", "#€", "#abc€"] {
+            assert!(text.parse::<Color>().is_err(), "{text:?} should be refused");
+        }
     }
 
     #[test]
