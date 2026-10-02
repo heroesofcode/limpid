@@ -4,12 +4,12 @@ description = "Scanning and cleaning engine for Limpid"
 version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
+publish.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-anyhow.workspace = true
 thiserror.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -24,3 +24,6 @@ toml_edit = "0.25"
 
 [dev-dependencies]
 tempfile = "3.24"
+
+[lints]
+workspace = true

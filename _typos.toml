@@ -1,0 +1,16 @@
+# Spelling, checked by `typos` in CI.
+
+[files]
+extend-exclude = [
+    # Generated, and full of crate names that are not words.
+    "Cargo.lock",
+    "CHANGELOG.md",
+    "*.svg",
+]
+
+[default.extend-words]
+# Misspelt on purpose. These are config keys the tests write wrongly, to
+# prove that a misspelt setting is reported to the person rather than
+# silently ignored — and that saving keeps their mistake for them to fix.
+pacakge = "pacakge"
+jornal = "jornal"

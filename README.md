@@ -271,7 +271,11 @@ everything else works without it.
 ```sh
 make build     # cargo build --release --workspace
 make check     # fmt, clippy with warnings denied, and the tests
+make audit     # supply chain, spelling and unused dependencies
 ```
+
+`make audit` needs `cargo-deny`, `cargo-machete` and `typos`:
+`cargo binstall cargo-deny cargo-machete typos-cli`.
 
 ## License
 

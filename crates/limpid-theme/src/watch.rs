@@ -89,10 +89,10 @@ pub fn watch(locations: Locations) -> notify::Result<Watcher> {
                 // the finished state rather than a half-applied one.
                 while raw_rx.recv_timeout(SETTLE).is_ok() {}
 
-                if let Some(palette) = locations.load() {
-                    if palette_tx.send(palette).is_err() {
-                        break;
-                    }
+                if let Some(palette) = locations.load()
+                    && palette_tx.send(palette).is_err()
+                {
+                    break;
                 }
             }
         })

@@ -4,15 +4,14 @@ description = "Palette resolution for Limpid, following the Omarchy theme when p
 version = "0.3.0"
 edition.workspace = true
 rust-version.workspace = true
+publish.workspace = true
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-anyhow.workspace = true
 thiserror.workspace = true
 toml.workspace = true
-tracing.workspace = true
 
 dirs = "7.0"
 notify = "8.2"
@@ -20,3 +19,6 @@ zbus = "5.11"
 
 [dev-dependencies]
 tempfile = "3.24"
+
+[lints]
+workspace = true

@@ -19,6 +19,16 @@
 
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
+// Tests build and tear down fixtures freely. The rule in clippy.toml is about
+// what the program removes, and the library is still checked against it in the
+// ordinary, non-test build.
+#![cfg_attr(
+    test,
+    allow(
+        clippy::disallowed_methods,
+        reason = "fixtures are created and removed by the tests themselves"
+    )
+)]
 
 pub mod appearance;
 pub mod color;

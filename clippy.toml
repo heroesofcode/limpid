@@ -1,0 +1,39 @@
+# Clippy configuration. The lint levels themselves are in Cargo.toml, under
+# [workspace.lints]; this file holds what those lints are told.
+
+# Tests set up fixtures and assert on them, and a panic there is the failure
+# being reported, not a plan left half-done.
+allow-unwrap-in-tests = true
+allow-panic-in-tests = true
+allow-dbg-in-tests = true
+
+# What the program may not call outside the places allowed to.
+#
+# These are .claude/safety.md made mechanical. The rules there say nothing in
+# the GUI deletes a file, the guard never resolves a path, and the root side
+# does nothing it was not written to do. Each was true because someone
+# remembered. This makes the compiler remember: a new call fails the build,
+# and the site that legitimately needs one says why with
+# `#[expect(clippy::disallowed_methods, reason = "...")]`.
+disallowed-methods = [
+    # Removal. The executor and the helper are where files are removed, after
+    # the guard has seen each path at the moment of acting on it. Anywhere
+    # else is a second removal path that the guard does not stand in front
+    # of.
+    { path = "std::fs::remove_file", reason = "files are removed by the executor, after the guard; see .claude/safety.md" },
+    { path = "std::fs::remove_dir", reason = "files are removed by the executor, after the guard; see .claude/safety.md" },
+    { path = "std::fs::remove_dir_all", reason = "files are removed by the executor, after the guard; see .claude/safety.md" },
+    { path = "trash::delete", reason = "files are trashed by the executor, after the guard; see .claude/safety.md" },
+    { path = "trash::delete_all", reason = "files are trashed by the executor, after the guard; see .claude/safety.md" },
+
+    # Resolution. Canonicalising follows symlinks, and a symlink is exactly
+    # what a bug or an attacker uses to leave a boundary. The guard refuses
+    # `..` rather than resolving it, and nothing else should resolve either.
+    { path = "std::fs::canonicalize", reason = "follows symlinks; the guard refuses a path rather than resolving it" },
+    { path = "std::path::Path::canonicalize", reason = "follows symlinks; the guard refuses a path rather than resolving it" },
+
+    # Processes. A spawned program runs with this process's authority, and in
+    # the helper that is root. Every one is a decision, made where it can be
+    # seen.
+    { path = "std::process::Command::new", reason = "every spawned process is deliberate; say why at the call site" },
+]

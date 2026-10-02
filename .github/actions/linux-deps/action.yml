@@ -1,0 +1,15 @@
+name: Linux build dependencies
+description: >-
+  The system libraries the Iced front-end needs: wgpu needs a Vulkan loader,
+  and winit needs the Wayland and X11 client libraries even to link.
+
+runs:
+  using: composite
+  steps:
+    - name: Install system libraries
+      shell: bash
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y --no-install-recommends \
+          libwayland-dev libxkbcommon-dev libvulkan-dev \
+          libx11-dev libxcursor-dev libxrandr-dev libxi-dev
