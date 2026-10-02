@@ -28,7 +28,11 @@ chat:
 
 reviews:
   profile: chill
-  request_changes_workflow: false
+  # Request changes while findings are open, and approve once the latest
+  # commit has been reviewed, every comment is resolved and no pre-merge check
+  # fails. That approval is the one signal that the review of the current
+  # commit is finished, and it is what auto-merge waits for.
+  request_changes_workflow: true
   high_level_summary: true
   poem: false
   in_progress_fortune: false
