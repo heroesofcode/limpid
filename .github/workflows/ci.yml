@@ -200,29 +200,12 @@ jobs:
           "$RUNNER_TEMP/actionlint" -color \
             -ignore 'specifying action "\$/[^"]+" in invalid format'
 
-  title:
-    name: pull request title
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      # release-please builds the changelog and the next version from
-      # squash-merged titles, so a title that is not a Conventional Commit is
-      # a release note that silently goes missing.
-      - name: Conventional Commit
-        if: github.event_name == 'pull_request'
-        env:
-          TITLE: ${{ github.event.pull_request.title }}
-        run: |
-          pattern='^(feat|fix|docs|chore|refactor|perf|test|build|ci|style|revert)(\([a-z0-9-]+\))?!?: [^ ].*$'
-          if [[ ! "$TITLE" =~ $pattern ]]; then
-            echo "::error::'$TITLE' is not a Conventional Commit, e.g. 'fix(guard): refuse a symlinked parent'"
-            exit 1
-          fi
-
-  # The one status check main requires. Every job above is in `needs`, so
-  # requiring this is requiring all of them, and adding a job here is the only
-  # change needed to make it required too. `always()` matters: a job skipped
-  # because something it needed failed would otherwise report as passing.
+  # The status check main requires for the code. Every job above is in
+  # `needs`, so requiring this is requiring all of them, and adding a job here
+  # is the only change needed to make it required too. `always()` matters: a
+  # job skipped because something it needed failed would otherwise report as
+  # passing. The pull request title is the other required check, in
+  # pr-title.yml, for the reason given there.
   ci:
     name: ci
     if: always()
@@ -236,7 +219,6 @@ jobs:
       - supply-chain
       - hygiene
       - workflows
-      - title
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:

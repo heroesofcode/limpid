@@ -63,9 +63,11 @@ before anything touches dependencies. `audit` needs `cargo-deny`,
 
 CI (`.github/workflows/ci.yml`) runs all of that, plus the minimum Rust
 version, the documentation, a release build, and a security audit of the
-workflows themselves. Every job feeds one check named `ci`, which is the only
-status main requires — so a new job must be added to its `needs`, and its name
-must not change.
+workflows themselves. Every job feeds one check named `ci`, so a new job must
+be added to its `needs`, and its name must not change. Main requires that and
+one more, `pull request title`, which lives in `pr-title.yml` so that editing a
+title reruns only the title check. Main also requires every review conversation
+to be resolved: a finding is fixed, or answered and then resolved, never left.
 
 Two configuration files are part of the safety model, not housekeeping:
 
