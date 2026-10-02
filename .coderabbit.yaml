@@ -127,8 +127,9 @@ reviews:
         - Permissions are granted per job, at the minimum, and the workflow
           default is read-only or none.
         - No `${{ }}` expansion inside `run:`; pass values through `env:`.
-        - The `ci` job in ci.yml is the required status check on main. Its
-          name must not change, and every other CI job must be in its `needs`.
+        - Main requires two checks: the `ci` job in ci.yml, whose name must
+          not change and whose `needs` must list every other CI job, and the
+          `pull request title` job in pr-title.yml.
 
     - path: "{clippy.toml,deny.toml,Cargo.toml,crates/*/Cargo.toml}"
       instructions: |
