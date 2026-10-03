@@ -465,6 +465,21 @@ fn empty_confirmation<'a>(
     .spacing(4)
     .width(Length::Fill);
 
+    // Back with a different figure and no reason given would read as a
+    // glitch. It is the opposite: nothing was removed, because what was in
+    // the trash had changed since the page measured it.
+    if storage.trash_grown {
+        body = body.push(
+            text(
+                "The trash has grown since this page was measured, so nothing was \
+                 removed. This is what is in it now.",
+            )
+            .size(ty::BODY_SMALL)
+            .style(style::body(palette))
+            .width(Length::Fill),
+        );
+    }
+
     if let Some(magnitude) = &large {
         body = body.push(Space::new().height(Length::Fixed(ty::GAP_TIGHT)));
         body = body.push(view::large(
