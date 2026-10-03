@@ -9,9 +9,10 @@ use limpid_core::config::Exclusions;
 use limpid_core::execute::Outcome;
 use limpid_core::plan::Disposal;
 use limpid_core::size::human;
+use limpid_core::walk::Usage;
 use limpid_theme::Palette;
 
-use crate::app::{Message, State, Storage, placeholder};
+use crate::app::{Message, Removal, State, Storage, placeholder};
 use crate::layout::Metrics;
 use crate::style;
 use crate::typography as ty;
@@ -69,9 +70,19 @@ pub fn view<'a>(palette: Palette, metrics: Metrics, state: &'a State) -> Element
         body = body.push(result(palette, metrics, *disposal, outcome));
     }
 
+    let selecting = !storage.plan(Disposal::Trash).is_empty();
+    if storage.confirming_empty {
+        body = body.push(empty_confirmation(palette, metrics, state));
+    } else if !survey.trash.is_empty() && !selecting && !storage.confirming_delete {
+        // Not beside a selection: one strip offering actions at a time. It is
+        // what is on screen right after something is moved to the trash,
+        // because trashing clears the selection.
+        body = body.push(trash_bar(palette, metrics, &survey.trash));
+    }
+
     if storage.confirming_delete {
         body = body.push(confirmation(palette, metrics, state));
-    } else if !storage.plan(Disposal::Trash).is_empty() {
+    } else if selecting {
         // The plan rather than the ticks: a ticked file that has gone from
         // the disk since leaves a tick and nothing to act on, and a bar
         // saying "0 selected" offers buttons that do nothing.
@@ -374,11 +385,112 @@ fn confirmation<'a>(palette: Palette, metrics: Metrics, state: &State) -> Elemen
     .into()
 }
 
+/// What is sitting in the trash, and the way to actually free it.
+///
+/// Moving something to the trash keeps it on the same disk, so on its own it
+/// frees nothing. Without this, trashing the largest file looked like a button
+/// that did nothing: the space stayed where it was, and the file was still
+/// there to be found.
+fn trash_bar<'a>(palette: Palette, metrics: Metrics, trash: &Usage) -> Element<'a, Message> {
+    let summary = format!(
+        "{} in the trash, across {} files. It frees nothing until the trash is \
+         emptied.",
+        human(trash.size.on_disk),
+        trash.files,
+    );
+    view::selection_bar(
+        palette,
+        metrics,
+        summary,
+        Vec::new(),
+        ("Empty trash", Some(Message::AskToEmptyTrash)),
+    )
+}
+
+/// The confirmation for emptying the trash.
+///
+/// Asked, unlike moving something there: this is the point of no return for
+/// everything in it, and some of that was put there by other programs and
+/// may be something the person still means to restore.
+fn empty_confirmation<'a>(
+    palette: Palette,
+    metrics: Metrics,
+    state: &State,
+) -> Element<'a, Message> {
+    let storage = state.storage();
+    let trash = storage
+        .survey
+        .as_ref()
+        .map(|survey| survey.trash.clone())
+        .unwrap_or_default();
+
+    let stacked = !metrics.buttons_inline();
+    let cancel = action("Cancel", stacked)
+        .style(style::quiet_button(palette))
+        .padding([10, 18])
+        .on_press(Message::CancelEmptyTrash);
+    let large = state.trash_magnitude();
+    let allowed = large.is_none() || storage.checked_large;
+    let empty = action("Empty trash", stacked)
+        .style(style::danger_button(palette))
+        .padding([10, 20])
+        .on_press_maybe(allowed.then_some(Message::EmptyTrash));
+
+    let actions: Element<'a, Message> = if stacked {
+        column![cancel, empty]
+            .spacing(ty::GAP_TIGHT)
+            .width(Length::Fill)
+            .into()
+    } else {
+        row![Space::new().width(Length::Fill), cancel, empty]
+            .spacing(ty::GAP_TIGHT)
+            .into()
+    };
+
+    let mut body = column![
+        text(format!("Empty the trash? {}", human(trash.size.on_disk)))
+            .size(ty::TITLE)
+            .style(style::heading(palette))
+            .width(Length::Fill),
+        text(format!(
+            "All {} files in the trash are deleted permanently, including anything \
+             other applications put there. Restore whatever you want to keep from \
+             your file manager first.",
+            trash.files,
+        ))
+        .size(ty::BODY_SMALL)
+        .style(style::secondary(palette))
+        .width(Length::Fill),
+    ]
+    .spacing(4)
+    .width(Length::Fill);
+
+    if let Some(magnitude) = &large {
+        body = body.push(Space::new().height(Length::Fixed(ty::GAP_TIGHT)));
+        body = body.push(view::large(
+            palette,
+            metrics,
+            magnitude,
+            storage.checked_large,
+            Message::CheckLargeDelete,
+        ));
+    }
+
+    container(
+        body.push(Space::new().height(Length::Fixed(ty::GAP)))
+            .push(actions),
+    )
+    .style(style::card(palette))
+    .padding(metrics.card)
+    .width(Length::Fill)
+    .into()
+}
+
 /// What the last removal from this page did.
 fn result<'a>(
     palette: Palette,
     metrics: Metrics,
-    disposal: Disposal,
+    removal: Removal,
     outcome: &Outcome,
 ) -> Element<'a, Message> {
     let line = |good: bool, said: String| {
@@ -401,15 +513,20 @@ fn result<'a>(
     // The trash is a rename on the same disk, so nothing is freed until it
     // is emptied. Saying "removed" there would be saying the space came back
     // when it has not.
-    let said = match disposal {
-        Disposal::Trash => format!(
+    let said = match removal {
+        Removal::Trashed => format!(
             "Moved {} to the trash, across {} files. The space comes back once the \
              trash is emptied.",
             human(outcome.reclaimed.on_disk),
             outcome.files,
         ),
-        Disposal::Delete => format!(
+        Removal::Deleted => format!(
             "Removed {} across {} files.",
+            human(outcome.reclaimed.on_disk),
+            outcome.files
+        ),
+        Removal::Emptied => format!(
+            "Emptied the trash: {} freed, across {} files.",
             human(outcome.reclaimed.on_disk),
             outcome.files
         ),

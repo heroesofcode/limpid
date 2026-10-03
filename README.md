@@ -96,6 +96,11 @@ a second confirmation, a folder cannot yet. A folder that holds your desktop's
 settings — `~/.config`, `~/.local/share`, `~/.local/state` — cannot be
 chosen at all.
 
+The trash is on the same disk, so moving something there frees nothing yet.
+What is in it is shown on its own, with the way to empty it, rather than
+coming back among the largest files under its trash name as if nothing had
+happened.
+
 ![The storage view](docs/storage.png)
 
 ## Using it

@@ -255,24 +255,60 @@ pub fn largest_files(
 pub struct Survey {
     /// What is directly inside the directory.
     pub breakdown: Breakdown,
-    /// The largest individual files anywhere under it.
+    /// The largest individual files anywhere under it, the trash's left out.
     pub largest: Vec<Entry>,
+    /// What is sitting in the trash: space that looks freed and is not.
+    ///
+    /// Measured on every survey, wherever it is taken from, because it is the
+    /// answer to "I removed it and nothing changed".
+    pub trash: walk::Usage,
 }
 
 /// Answer both halves of "where did the space go" for one directory.
 ///
-/// The two walks run side by side rather than one after the other. They read
-/// the same directories, so the second is largely served from the page cache
-/// the first warmed, and the wall time is close to that of one.
-pub fn survey(root: &Path, files: usize, options: &WalkOptions) -> std::io::Result<Survey> {
-    let (breakdown, largest) = rayon::join(
+/// `trash` is what emptying the trash removes — the paths of
+/// [`crate::catalog::trash::target`], passed in so that what is measured
+/// here and what the button empties are the same paths.
+///
+/// The trash is left out of `largest`. Something moved there is still on the
+/// disk, so it would come straight back as the largest file under its new
+/// name, as if moving it had done nothing; and a file in the trash is not a
+/// candidate to act on one by one — what it waits for is the trash being
+/// emptied. So it is measured on its own instead, and the breakdown still
+/// counts it: that is accounting, and leaving it out would make the treemap
+/// lie about where the space is.
+///
+/// The walks run side by side rather than one after the other. They read the
+/// same directories, so each is largely served from the page cache the others
+/// warmed, and the wall time is close to that of one.
+pub fn survey(
+    root: &Path,
+    files: usize,
+    options: &WalkOptions,
+    trash: &[PathBuf],
+) -> std::io::Result<Survey> {
+    let mut listing = options.clone();
+    for path in trash {
+        listing.skip.add(path.clone());
+    }
+
+    // The trash is measured with the person's exclusions, unlike the
+    // breakdown: the figure is "what emptying it would remove", and the
+    // executor leaves anything excluded in there alone.
+    let (breakdown, (largest, trashed)) = rayon::join(
         || breakdown(root, options),
-        || largest_files(root, files, options),
+        || {
+            rayon::join(
+                || largest_files(root, files, &listing),
+                || walk::measure_all(trash, options),
+            )
+        },
     );
 
     Ok(Survey {
         breakdown: breakdown?,
         largest: largest.unwrap_or_default(),
+        trash: trashed.unwrap_or_default(),
     })
 }
 
@@ -393,10 +429,72 @@ mod tests {
     fn a_survey_answers_both_halves_at_once() {
         let root = tree();
 
-        let survey = survey(root.path(), 2, &WalkOptions::default()).unwrap();
+        let survey = survey(root.path(), 2, &WalkOptions::default(), &[]).unwrap();
 
         assert_eq!(survey.breakdown.children.len(), 3);
         assert_eq!(survey.largest.len(), 2);
+    }
+
+    /// A home with one large file just moved to the trash, the way the trash
+    /// crate does it: the file under `Trash/files`, its record under
+    /// `Trash/info`.
+    fn home_with_something_trashed() -> (tempfile::TempDir, Vec<PathBuf>) {
+        let home = tempfile::tempdir().unwrap();
+        let trash = home.path().join(".local/share/Trash");
+        write(&trash.join("files/ubuntu.iso"), 40_000);
+        write(&trash.join("info/ubuntu.iso.trashinfo"), 100);
+        write(&home.path().join("Documents/notes.pdf"), 2_000);
+        let paths = vec![trash.join("files"), trash.join("info")];
+        (home, paths)
+    }
+
+    #[test]
+    fn a_file_moved_to_the_trash_does_not_come_back_as_the_largest() {
+        // What it did: trash the largest file, measure again, and find the
+        // same file at the top under its trash path, as if nothing had
+        // happened.
+        let (home, trash) = home_with_something_trashed();
+
+        let survey = survey(home.path(), 5, &WalkOptions::default(), &trash).unwrap();
+
+        let names: Vec<&str> = survey.largest.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["notes.pdf"]);
+    }
+
+    #[test]
+    fn the_trash_is_measured_on_its_own_with_its_records() {
+        let (home, trash) = home_with_something_trashed();
+
+        let survey = survey(home.path(), 5, &WalkOptions::default(), &trash).unwrap();
+
+        // Both halves, as emptying removes both.
+        assert_eq!(survey.trash.size.apparent, 40_100);
+        assert_eq!(survey.trash.files, 2);
+    }
+
+    #[test]
+    fn the_treemap_still_counts_what_is_in_the_trash() {
+        // It is still on the disk. A breakdown that left it out would show
+        // a home smaller than the one the disk is holding.
+        let (home, trash) = home_with_something_trashed();
+
+        let survey = survey(home.path(), 5, &WalkOptions::default(), &trash).unwrap();
+
+        assert_eq!(survey.breakdown.total().apparent, 42_100);
+    }
+
+    #[test]
+    fn a_missing_trash_measures_to_nothing() {
+        let root = tree();
+        let trash = vec![
+            root.path().join(".local/share/Trash/files"),
+            root.path().join(".local/share/Trash/info"),
+        ];
+
+        let survey = survey(root.path(), 5, &WalkOptions::default(), &trash).unwrap();
+
+        assert!(survey.trash.is_empty());
+        assert_eq!(survey.largest.len(), 4);
     }
 
     #[test]
