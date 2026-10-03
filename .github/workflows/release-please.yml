@@ -89,14 +89,19 @@ jobs:
         id: package
         run: |
           staging="limpid-${TAG#v}-x86_64-linux"
-          # The binaries go where the Makefile looks for them, so that
-          # `make install` inside the extracted tarball is the same command
-          # as in a checkout. The 0.3.0 tarball put them at the top level,
-          # and `make install` there failed on a missing target/release/.
+          # The binaries go where the install task looks for them, so that
+          # `./mise-tasks/install` inside the extracted tarball is the same
+          # command as in a checkout. The 0.3.0 tarball put them at the top
+          # level, and installing from it failed on a missing target/release/.
           mkdir -p "$staging/target/release"
           cp target/release/limpid target/release/limpid-cli \
              target/release/limpid-helper "$staging/target/release/"
-          cp -r data README.md LICENSE Makefile "$staging/"
+          cp -r data README.md LICENSE "$staging/"
+          # Whichever installer the tag has. A rebuild of a tag cut before
+          # mise-tasks existed has a Makefile instead, and must still package.
+          for installer in mise-tasks Makefile; do
+            if [ -e "$installer" ]; then cp -r "$installer" "$staging/"; fi
+          done
           tar -czf "${staging}.tar.gz" "$staging"
           sha256sum "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
           echo "tarball=${staging}.tar.gz" >> "$GITHUB_OUTPUT"

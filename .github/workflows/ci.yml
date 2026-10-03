@@ -26,6 +26,9 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  # rustfmt, clippy, tests and the release build run the tasks in mise.toml,
+  # the same ones a contributor runs, so the two cannot drift apart. The
+  # other jobs are checks that only CI makes.
   fmt:
     name: rustfmt
     runs-on: ubuntu-latest
@@ -35,7 +38,8 @@ jobs:
         with:
           persist-credentials: false
       - run: rustup toolchain install
-      - run: cargo fmt --all --check
+      - uses: jdx/mise-action@7a4e45a543138629540c9a1616d08632b893e492 # v5.0.1
+      - run: mise run rustfmt
 
   clippy:
     name: clippy
@@ -50,9 +54,10 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: jdx/mise-action@7a4e45a543138629540c9a1616d08632b893e492 # v5.0.1
       # Includes the project's own rules in clippy.toml: removing files,
       # resolving paths and spawning processes outside the places allowed to.
-      - run: cargo clippy --workspace --all-targets --all-features --locked -- -D warnings
+      - run: mise run clippy
 
   test:
     name: tests
@@ -67,7 +72,8 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
-      - run: cargo test --workspace --all-features --locked
+      - uses: jdx/mise-action@7a4e45a543138629540c9a1616d08632b893e492 # v5.0.1
+      - run: mise run test
 
   msrv:
     name: minimum Rust version
@@ -128,9 +134,10 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: jdx/mise-action@7a4e45a543138629540c9a1616d08632b893e492 # v5.0.1
       # Thin LTO and one codegen unit only happen here. Finding out that they
       # fail at release time means finding out after the tag exists.
-      - run: cargo build --workspace --release --locked
+      - run: mise run build
 
   supply-chain:
     name: supply chain

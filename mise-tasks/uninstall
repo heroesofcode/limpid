@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+#MISE description="Remove everything the install task put in place"
+#
+# Takes the same DESTDIR and PREFIX as install, and runs without mise too:
+#
+#   sudo ./mise-tasks/uninstall
+#
+# Unlike install, any PREFIX is accepted. The Makefile this replaced allowed
+# one, so an install under /usr/local may exist, and this is how it comes out:
+#
+#   sudo PREFIX=/usr/local ./mise-tasks/uninstall
+set -euo pipefail
+
+prefix="${DESTDIR:-}${PREFIX:-/usr}"
+
+rm -f  "$prefix/bin/limpid" "$prefix/bin/limpid-cli"
+rm -f  "$prefix/lib/limpid/limpid-helper"
+rmdir  "$prefix/lib/limpid" 2>/dev/null || true
+rm -f  "$prefix/share/polkit-1/actions/org.limpid.helper.policy"
+rm -f  "$prefix/share/applications/limpid.desktop"
+rm -f  "$prefix/share/icons/hicolor/scalable/apps/limpid.svg"
+rm -rf "$prefix/share/licenses/limpid"

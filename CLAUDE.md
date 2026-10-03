@@ -52,22 +52,25 @@ before calling any layout work finished.
 ## Working here
 
 ```sh
-make build     # cargo build --release --workspace
-make check     # fmt, clippy with warnings denied, and the tests
-make audit     # supply chain, spelling and unused dependencies
+mise run build   # cargo build --release --workspace --locked
+mise run check   # rustfmt, clippy with warnings denied, and the tests
+mise run audit   # supply chain, spelling and unused dependencies
 ```
 
-`make check` must pass before anything is considered done, and `make audit`
-before anything touches dependencies. `audit` needs `cargo-deny`,
-`cargo-machete` and `typos` on `PATH`.
+`mise run check` must pass before anything is considered done, and `mise run
+audit` before anything touches dependencies. `audit` needs `cargo-deny`,
+`cargo-machete` and `typos` on `PATH`. The tasks live in `mise.toml`; `mise
+tasks` lists them. Always `mise run`: a bare `mise fmt` or `mise install` is
+one of mise's own commands, not a task here.
 
-CI (`.github/workflows/ci.yml`) runs all of that, plus the minimum Rust
-version, the documentation, a release build, and a security audit of the
-workflows themselves. Every job feeds one check named `ci`, so a new job must
-be added to its `needs`, and its name must not change. Main requires that and
-one more, `pull request title`, which lives in `pr-title.yml` so that editing a
-title reruns only the title check. Main also requires every review conversation
-to be resolved: a finding is fixed, or answered and then resolved, never left.
+CI (`.github/workflows/ci.yml`) runs the same tasks for rustfmt, clippy, the
+tests and the release build, one job each, plus the minimum Rust version, the
+documentation, the supply chain, and a security audit of the workflows
+themselves. Every job feeds one check named `ci`, so a new job must be added
+to its `needs`, and its name must not change. Main requires that and one more,
+`pull request title`, which lives in `pr-title.yml` so that editing a title
+reruns only the title check. Main also requires every review conversation to
+be resolved: a finding is fixed, or answered and then resolved, never left.
 
 Two configuration files are part of the safety model, not housekeeping:
 

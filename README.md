@@ -253,15 +253,25 @@ yay -S limpid
 Or from source:
 
 ```sh
-make build
-sudo make install
+mise run build
+sudo ./mise-tasks/install
 ```
 
-`make install` puts `limpid` and `limpid-cli` in `/usr/bin`, the privileged
+The install task is a plain script, so it runs under `sudo` without mise
+being installed for root; `mise run install` works too when the prefix is
+writable. It puts `limpid` and `limpid-cli` in `/usr/bin`, the privileged
 helper in `/usr/lib/limpid` — it is not a command anyone should run directly,
 and the polkit policy names that exact path — and the policy, desktop entry
-and icon where the desktop expects them. `make uninstall` takes it all back
-out.
+and icon where the desktop expects them. `./mise-tasks/uninstall` takes it all
+back out.
+
+Only `PREFIX=/usr` is supported, and the install task refuses anything else.
+The application looks for the helper at that exact path, the polkit policy
+authorises only that path, and polkit reads policies only from `/usr/share`
+— installed anywhere else, Limpid would open normally and every operation
+needing root would quietly fail. `DESTDIR` works as usual for staging a
+package. The uninstall task accepts any `PREFIX`, so an older install under
+`/usr/local` can still be removed.
 
 `paccache` (from `pacman-contrib`) is needed for the package-cache operation;
 everything else works without it.
@@ -269,12 +279,12 @@ everything else works without it.
 ## Building
 
 ```sh
-make build     # cargo build --release --workspace
-make check     # fmt, clippy with warnings denied, and the tests
-make audit     # supply chain, spelling and unused dependencies
+mise run build   # cargo build --release --workspace --locked
+mise run check   # rustfmt, clippy with warnings denied, and the tests
+mise run audit   # supply chain, spelling and unused dependencies
 ```
 
-`make audit` needs `cargo-deny`, `cargo-machete` and `typos`:
+`mise run audit` needs `cargo-deny`, `cargo-machete` and `typos`:
 `cargo binstall cargo-deny cargo-machete typos-cli`.
 
 ## License

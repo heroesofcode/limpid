@@ -38,5 +38,5 @@ check() {
 
 package() {
   cd "$pkgname-$pkgver"
-  make DESTDIR="$pkgdir" PREFIX=/usr install
+  DESTDIR="$pkgdir" PREFIX=/usr ./mise-tasks/install
 }
