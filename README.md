@@ -253,15 +253,17 @@ yay -S limpid
 Or from source:
 
 ```sh
-make build
-sudo make install
+mise build
+sudo ./mise-tasks/install
 ```
 
-`make install` puts `limpid` and `limpid-cli` in `/usr/bin`, the privileged
+The install task is a plain script, so it runs under `sudo` without mise
+being installed for root; `mise run install` works too when the prefix is
+writable. It puts `limpid` and `limpid-cli` in `/usr/bin`, the privileged
 helper in `/usr/lib/limpid` — it is not a command anyone should run directly,
 and the polkit policy names that exact path — and the policy, desktop entry
-and icon where the desktop expects them. `make uninstall` takes it all back
-out.
+and icon where the desktop expects them. `./mise-tasks/uninstall` takes it all
+back out. Both take `PREFIX` (default `/usr`) and `DESTDIR`.
 
 `paccache` (from `pacman-contrib`) is needed for the package-cache operation;
 everything else works without it.
@@ -269,8 +271,8 @@ everything else works without it.
 ## Building
 
 ```sh
-make build     # cargo build --release --workspace
-make check     # fmt, clippy with warnings denied, and the tests
+mise build  # cargo build --release --workspace
+mise check  # fmt, clippy with warnings denied, and the tests
 ```
 
 ## License

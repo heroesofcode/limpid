@@ -52,11 +52,11 @@ before calling any layout work finished.
 ## Working here
 
 ```sh
-make build     # cargo build --release --workspace
-make check     # fmt, clippy with warnings denied, and the tests
+mise build  # cargo build --release --workspace
+mise check  # fmt, clippy with warnings denied, and the tests
 ```
 
-`make check` must pass before anything is considered done. CI runs the same
+`mise check` must pass before anything is considered done. CI runs the same
 three steps and treats warnings as errors.
 
 Point the whole engine at a fixture instead of the real filesystem with

@@ -1,0 +1,25 @@
+#!/usr/bin/env bash
+#MISE description="Install the binaries, helper, polkit policy and desktop entry"
+#
+# `mise build` first. Runs without mise as well, which is how the
+# PKGBUILD and the release tarball use it:
+#
+#   sudo ./mise-tasks/install
+#   DESTDIR="$pkgdir" PREFIX=/usr ./mise-tasks/install
+#
+# The helper goes to libexec rather than bin: it is not a command anyone
+# should run, and the polkit policy names that exact path.
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+prefix="${DESTDIR:-}${PREFIX:-/usr}"
+target=target/release
+
+install -Dm755 "$target/limpid"        "$prefix/bin/limpid"
+install -Dm755 "$target/limpid-cli"    "$prefix/bin/limpid-cli"
+install -Dm755 "$target/limpid-helper" "$prefix/lib/limpid/limpid-helper"
+install -Dm644 data/org.limpid.helper.policy "$prefix/share/polkit-1/actions/org.limpid.helper.policy"
+install -Dm644 data/limpid.desktop     "$prefix/share/applications/limpid.desktop"
+install -Dm644 data/limpid.svg         "$prefix/share/icons/hicolor/scalable/apps/limpid.svg"
+install -Dm644 LICENSE                 "$prefix/share/licenses/limpid/LICENSE"
