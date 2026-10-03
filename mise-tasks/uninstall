@@ -4,6 +4,11 @@
 # Takes the same DESTDIR and PREFIX as install, and runs without mise too:
 #
 #   sudo ./mise-tasks/uninstall
+#
+# Unlike install, any PREFIX is accepted. The Makefile this replaced allowed
+# one, so an install under /usr/local may exist, and this is how it comes out:
+#
+#   sudo PREFIX=/usr/local ./mise-tasks/uninstall
 set -euo pipefail
 
 prefix="${DESTDIR:-}${PREFIX:-/usr}"

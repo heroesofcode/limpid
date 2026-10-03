@@ -263,7 +263,15 @@ writable. It puts `limpid` and `limpid-cli` in `/usr/bin`, the privileged
 helper in `/usr/lib/limpid` — it is not a command anyone should run directly,
 and the polkit policy names that exact path — and the policy, desktop entry
 and icon where the desktop expects them. `./mise-tasks/uninstall` takes it all
-back out. Both take `PREFIX` (default `/usr`) and `DESTDIR`.
+back out.
+
+Only `PREFIX=/usr` is supported, and the install task refuses anything else.
+The application looks for the helper at that exact path, the polkit policy
+authorises only that path, and polkit reads policies only from `/usr/share`
+— installed anywhere else, Limpid would open normally and every operation
+needing root would quietly fail. `DESTDIR` works as usual for staging a
+package. The uninstall task accepts any `PREFIX`, so an older install under
+`/usr/local` can still be removed.
 
 `paccache` (from `pacman-contrib`) is needed for the package-cache operation;
 everything else works without it.

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #MISE description="Install the binaries, helper, polkit policy and desktop entry"
 #
-# `mise build` first. Runs without mise as well, which is how the
+# `mise run build` first. Runs without mise as well, which is how the
 # PKGBUILD and the release tarball use it:
 #
 #   sudo ./mise-tasks/install
@@ -13,7 +13,23 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-prefix="${DESTDIR:-}${PREFIX:-/usr}"
+# Only /usr. The application looks for the helper at
+# /usr/lib/limpid/limpid-helper, the polkit policy authorises that exact
+# path, and polkit reads policies only from /usr/share/polkit-1/actions. Under
+# any other prefix the install would finish without complaint and every
+# operation needing root would quietly stop working, so it is refused before
+# anything is copied. The path is fixed on purpose: where the root binary
+# lives is not something to make configurable. DESTDIR still stages the /usr
+# tree somewhere else, which is what packaging needs.
+install_prefix="${PREFIX:-/usr}"
+install_prefix="${install_prefix%/}"
+if [[ "$install_prefix" != /usr ]]; then
+  echo "install: PREFIX=$install_prefix is not supported, only /usr." >&2
+  echo "install: the privileged helper and its polkit policy only work there." >&2
+  exit 1
+fi
+
+prefix="${DESTDIR:-}${install_prefix}"
 target=target/release
 
 install -Dm755 "$target/limpid"        "$prefix/bin/limpid"
