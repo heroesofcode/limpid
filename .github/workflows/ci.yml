@@ -26,14 +26,11 @@ jobs:
 
       - uses: Swatinem/rust-cache@f51f967e158417aafa338a1e46ab22095f07aa01
 
-      - name: Check formatting
-        run: cargo fmt --all --check
+      # The same command as locally, so the two cannot drift apart.
+      - uses: jdx/mise-action@7a4e45a543138629540c9a1616d08632b893e492 # v5.0.1
 
-      - name: Clippy
-        run: cargo clippy --workspace --all-targets --all-features
-
-      - name: Test
-        run: cargo test --workspace --all-features
+      - name: Check
+        run: mise run check
 
       - name: Build release
         run: cargo build --workspace --release

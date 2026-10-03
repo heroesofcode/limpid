@@ -1,14 +1,3 @@
-# Development tasks. `mise tasks` lists them.
-#
-# The Rust toolchain is not declared here: rust-toolchain.toml already pins
-# it, and rustup reads that file whether mise is installed or not. A second
-# declaration would be a second place for the version to drift.
-#
-# Installing and uninstalling are file tasks in mise-tasks/, not entries
-# here, so they can run without mise: the PKGBUILD and the release tarball
-# call the scripts directly, and neither should need mise to be installed,
-# least of all under sudo.
-
 [tasks.build]
 description = "Build every crate in release mode"
 run = "cargo build --release --workspace"
@@ -18,7 +7,7 @@ description = "fmt, clippy with warnings denied, and the tests"
 run = [
   "cargo fmt --all --check",
   "cargo clippy --workspace --all-targets --all-features -- -D warnings",
-  "cargo test --workspace",
+  "cargo test --workspace --all-features",
 ]
 
 [tasks.clean]
