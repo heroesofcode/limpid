@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use limpid_core::analyse::{self, Breakdown, Entry};
+use limpid_core::analyse::{self, Survey};
 use limpid_core::catalog::{self, Context};
 use limpid_core::config::{self, Store};
 use limpid_core::execute::{Executor, Outcome, Problem};
@@ -217,12 +217,13 @@ fn main() -> Result<()> {
         Command::Storage { path, files } => {
             let root = path.unwrap_or_else(|| context.roots.home.clone());
             let colour = io::stdout().is_terminal();
-            match analyse::breakdown(&root, &context.walk) {
-                Ok(breakdown) => {
-                    let largest =
-                        analyse::largest_files(&root, files, &context.walk).unwrap_or_default();
+            // The trash's own paths, from the target that empties it, so the
+            // figure printed is what emptying would remove.
+            let trash = catalog::trash::target(&context.roots).paths;
+            match analyse::survey(&root, files, &context.walk, &trash) {
+                Ok(survey) => {
                     let mut stdout = io::stdout().lock();
-                    report_storage(&mut stdout, &breakdown, &largest, colour)
+                    report_storage(&mut stdout, &survey, colour)
                 }
                 Err(error) => {
                     eprintln!("cannot read {}: {error}", root.display());
@@ -569,13 +570,10 @@ fn report_clean(out: &mut impl Write, shown: &Shown, colour: bool) -> io::Result
 }
 
 /// Print a directory breakdown and the largest files under it.
-fn report_storage(
-    out: &mut impl Write,
-    breakdown: &Breakdown,
-    largest: &[Entry],
-    colour: bool,
-) -> io::Result<()> {
+fn report_storage(out: &mut impl Write, survey: &Survey, colour: bool) -> io::Result<()> {
     let style = Style { enabled: colour };
+    let breakdown = &survey.breakdown;
+    let largest = &survey.largest;
     let total = breakdown.total().on_disk;
 
     writeln!(
@@ -612,6 +610,21 @@ fn report_storage(
                 style.dim(&entry.path.display().to_string()),
             )?;
         }
+    }
+
+    // Said apart from the list: moving something to the trash keeps it on
+    // the disk, and this is where it went.
+    if !survey.trash.is_empty() {
+        writeln!(
+            out,
+            "\n{}  {}  {}",
+            style.bold("In the trash"),
+            human(survey.trash.size.on_disk),
+            style.dim(&format!(
+                "across {} files, which frees nothing until the trash is emptied",
+                survey.trash.files,
+            )),
+        )?;
     }
 
     if breakdown.unreadable > 0 {

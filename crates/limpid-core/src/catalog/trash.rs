@@ -6,31 +6,38 @@
 
 use super::Context;
 use crate::model::{Category, Kind, Risk, Target};
+use crate::paths::Roots;
 
-/// Measure the home trash.
+/// The home trash, unmeasured.
+///
+/// The one definition of what emptying the trash removes. The overview
+/// measures it through [`scan`]; the storage view measures the same paths to
+/// say how much is sitting there, and empties it through this same target,
+/// so the figure shown and what goes cannot drift apart.
 ///
 /// Per-mount trash directories (`$topdir/.Trash-$uid`) are not covered yet;
 /// finding them means walking the mount table, which belongs with the
 /// executor that would have to empty them coherently.
+pub fn target(roots: &Roots) -> Target {
+    Target::new("Home trash", Kind::Trash, Risk::Review)
+        .detail(
+            "Deleted files still recoverable from the trash. Emptying it is the \
+             point of no return for all of them.",
+        )
+        // Both halves: the files themselves and the .trashinfo metadata that
+        // a file manager needs to show them. Removing one without the other
+        // leaves the trash view broken.
+        .path(roots.data("Trash/files"))
+        .path(roots.data("Trash/info"))
+}
+
+/// Measure the home trash.
 pub fn scan(context: &Context) -> Category {
     let mut category = Category::new(
         "Trash",
         "Files you have already deleted but not yet discarded.",
     );
-
-    category.targets.push(
-        Target::new("Home trash", Kind::Trash, Risk::Review)
-            .detail(
-                "Deleted files still recoverable from the trash. Emptying it is the \
-                 point of no return for all of them.",
-            )
-            // Both halves: the files themselves and the .trashinfo metadata
-            // that a file manager needs to show them. Removing one without the
-            // other leaves the trash view broken.
-            .path(context.roots.data("Trash/files"))
-            .path(context.roots.data("Trash/info")),
-    );
-
+    category.targets.push(target(&context.roots));
     context.measure_all(category)
 }
 
@@ -64,5 +71,33 @@ mod tests {
 
         assert_eq!(category.targets[0].size.apparent, 3100);
         assert_eq!(category.targets[0].files, 2);
+    }
+
+    #[test]
+    fn emptying_through_the_target_takes_files_and_records_and_keeps_the_trash() {
+        // The path the storage page's "Empty trash" takes, end to end.
+        use crate::execute::Executor;
+        use crate::plan::Plan;
+
+        let fixture = tempfile::tempdir().unwrap();
+        let roots = Roots::under(fixture.path());
+        let files = roots.data("Trash/files");
+        let info = roots.data("Trash/info");
+        std::fs::create_dir_all(files.join("course/week-01")).unwrap();
+        std::fs::create_dir_all(&info).unwrap();
+        std::fs::write(files.join("ubuntu.iso"), vec![0u8; 40_000]).unwrap();
+        std::fs::write(files.join("course/week-01/lecture.mp4"), vec![0u8; 9_000]).unwrap();
+        std::fs::write(info.join("ubuntu.iso.trashinfo"), b"[Trash Info]\n").unwrap();
+        std::fs::write(info.join("course.trashinfo"), b"[Trash Info]\n").unwrap();
+
+        let target = Context::with_roots(roots.clone()).measure(target(&roots));
+        let outcome = Executor::applying(&roots).run(&Plan::from_targets([&target]));
+
+        assert!(outcome.is_clean(), "{:?}", outcome.problems);
+        assert_eq!(outcome.reclaimed.apparent, target.size.apparent);
+        // Emptied, not removed: a file manager expects both directories.
+        assert!(files.is_dir() && info.is_dir());
+        assert_eq!(std::fs::read_dir(&files).unwrap().count(), 0);
+        assert_eq!(std::fs::read_dir(&info).unwrap().count(), 0);
     }
 }
