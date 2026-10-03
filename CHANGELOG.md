@@ -1,5 +1,27 @@
 # Changelog
 
+## [0.4.0](https://github.com/heroesofcode/limpid/compare/v0.3.0...v0.4.0) (2026-10-03)
+
+
+### Features
+
+* a config file, and exclusions that are never offered or removed ([#24](https://github.com/heroesofcode/limpid/issues/24)) ([a76939b](https://github.com/heroesofcode/limpid/commit/a76939b49ee78d3af6060e62dd99a1a37f53d51f))
+* exclude from the overview and the storage view, and a settings page ([#25](https://github.com/heroesofcode/limpid/issues/25)) ([ab5ce16](https://github.com/heroesofcode/limpid/commit/ab5ce1671950acbc1743980929d52730a43c99d3))
+* find build output in projects, by a rule the guard checks again ([#27](https://github.com/heroesofcode/limpid/issues/27)) ([3344d2f](https://github.com/heroesofcode/limpid/commit/3344d2fd62a00b10a9243cba46f9e321fd3d18bd))
+* say what is ready, list exactly what goes, and question large plans ([4ce82b0](https://github.com/heroesofcode/limpid/commit/4ce82b027b0546c1d3bd6215552e97f3174ca5eb))
+* tick folders in the storage view, and send them to the trash whole ([689763b](https://github.com/heroesofcode/limpid/commit/689763ba4398805a36b9867a5d1da006b81b4008))
+
+
+### Bug fixes
+
+* make the release tarball installable, and correct what the roadmap said ([#22](https://github.com/heroesofcode/limpid/issues/22)) ([847f4f1](https://github.com/heroesofcode/limpid/commit/847f4f18f3d439a86229f8c872dc424a1c4f7472))
+* refuse a theme colour rather than panic on a multi-byte character ([541b7f5](https://github.com/heroesofcode/limpid/commit/541b7f5529edb6544dd37a5de391a8e38d05a246))
+
+
+### Refactoring
+
+* replace Makefile to Mise ([#32](https://github.com/heroesofcode/limpid/issues/32)) ([eab9cf2](https://github.com/heroesofcode/limpid/commit/eab9cf2dfbee9760182cb841026463ea7e16e1be))
+
 ## [0.3.0](https://github.com/heroesofcode/limpid/compare/v0.2.1...v0.3.0) (2026-09-28)
 
 
