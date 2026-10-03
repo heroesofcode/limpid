@@ -168,6 +168,27 @@ impl Setting {
 const LARGEST_FILES: usize = 8;
 
 /// The storage page's own state.
+/// How the last removal from the storage page was done, which decides what
+/// can honestly be said about it afterwards.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Removal {
+    /// The ticked files went to the trash: nothing is freed yet.
+    Trashed,
+    /// The ticked files were deleted outright.
+    Deleted,
+    /// The trash was emptied, which is when trashing frees anything.
+    Emptied,
+}
+
+impl From<Disposal> for Removal {
+    fn from(disposal: Disposal) -> Self {
+        match disposal {
+            Disposal::Trash => Self::Trashed,
+            Disposal::Delete => Self::Deleted,
+        }
+    }
+}
+
 #[derive(Default)]
 pub struct Storage {
     /// The path from the starting directory down to the one on screen, which
@@ -194,9 +215,11 @@ pub struct Storage {
     pub checked_large: bool,
     /// Whether a removal is under way.
     pub removing: bool,
-    /// What the last removal from this page did, and whether it went to the
-    /// trash — which says whether the space has actually come back.
-    pub outcome: Option<(Disposal, Outcome)>,
+    /// What the last removal from this page did, and how — which says
+    /// whether the space has actually come back.
+    pub outcome: Option<(Removal, Outcome)>,
+    /// Whether the confirmation for emptying the trash is up.
+    pub confirming_empty: bool,
     /// What was just excluded from this page.
     pub excluded: Option<Excluded>,
     /// Which walk the result on screen belongs to.
@@ -367,6 +390,14 @@ pub enum Message {
     DeleteSelected,
     /// A removal from the storage page finished, and how it was done.
     SelectionRemoved(Disposal, Box<Outcome>),
+    /// Ask before emptying the trash.
+    AskToEmptyTrash,
+    /// The empty-the-trash confirmation was dismissed.
+    CancelEmptyTrash,
+    /// Empty the trash.
+    EmptyTrash,
+    /// Emptying the trash finished.
+    TrashEmptied(Box<Outcome>),
     /// Nothing happened worth reacting to.
     Nothing,
     /// Show a file in the desktop's file manager.
@@ -522,6 +553,25 @@ impl State {
         self.checked_large
     }
 
+    /// What emptying the trash would do, at the size measured on screen.
+    ///
+    /// The target is the overview's, so what this describes and what the
+    /// button removes are the same paths.
+    pub fn trash_plan(&self) -> Plan {
+        let Some(survey) = &self.storage.survey else {
+            return Plan::new();
+        };
+        let target =
+            catalog::trash::target(&self.roots).measured(survey.trash.size, survey.trash.files);
+        Plan::from_targets([&target])
+    }
+
+    /// Whether emptying the trash is too large for the usual click. A trash
+    /// holding a quarter of the disk is exactly the plan rule 13 is about.
+    pub fn trash_magnitude(&self) -> Option<Magnitude> {
+        self.trash_plan().magnitude(self.storage.capacity)
+    }
+
     /// Act on the storage page's selection.
     fn remove_selection(&mut self, disposal: Disposal) -> Task<Message> {
         let plan = self.storage.plan(disposal);
@@ -618,6 +668,7 @@ impl State {
                     self.storage.selected.clear();
                 }
                 self.storage.confirming_delete = false;
+                self.storage.confirming_empty = false;
                 self.storage.excluded = None;
                 self.storage.working = true;
                 self.storage.survey = None;
@@ -631,7 +682,9 @@ impl State {
                                 skip: exclusions(&roots),
                                 ..WalkOptions::default()
                             };
-                            analyse::survey(&path, LARGEST_FILES, &options).unwrap_or_default()
+                            let trash = catalog::trash::target(&roots).paths;
+                            analyse::survey(&path, LARGEST_FILES, &options, &trash)
+                                .unwrap_or_default()
                         })
                         .await
                         .unwrap_or_default()
@@ -651,6 +704,7 @@ impl State {
                 Task::none()
             }
             Message::AskToDelete => {
+                self.storage.confirming_empty = false;
                 self.storage.confirming_delete =
                     !self.storage.has_folders() && !self.storage.plan(Disposal::Delete).is_empty();
                 // Asked every time it opens: a tick given for one list is
@@ -699,11 +753,73 @@ impl State {
             Message::CopyPath(path) => iced::clipboard::write(path.display().to_string()),
             Message::Nothing => Task::none(),
             Message::SelectionRemoved(disposal, outcome) => {
-                self.storage.outcome = Some((disposal, *outcome));
+                self.storage.outcome = Some((disposal.into(), *outcome));
                 self.storage.selected.clear();
                 self.storage.removing = false;
                 // Measure again rather than adjust: the figures on screen
                 // are a measurement, and after a removal they are stale.
+                match self.storage.trail.last().cloned() {
+                    Some(path) => Task::done(Message::Explore(path)),
+                    None => Task::none(),
+                }
+            }
+            Message::AskToEmptyTrash => {
+                // Only when there is something in it: a confirmation for
+                // nothing would be its own kind of noise.
+                let has_trash = self
+                    .storage
+                    .survey
+                    .as_ref()
+                    .is_some_and(|survey| !survey.trash.is_empty());
+                self.storage.confirming_delete = false;
+                self.storage.confirming_empty = has_trash;
+                // Asked every time it opens, as for every other large plan.
+                self.storage.checked_large = false;
+                self.storage.capacity = volume::capacity(&self.roots.home);
+                Task::none()
+            }
+            Message::CancelEmptyTrash => {
+                self.storage.confirming_empty = false;
+                self.storage.checked_large = false;
+                Task::none()
+            }
+            Message::EmptyTrash => {
+                // Refused here and not only by a greyed-out button, the same
+                // as every other permanent removal.
+                if !self.storage.confirming_empty
+                    || (self.trash_magnitude().is_some() && !self.storage.checked_large)
+                {
+                    return Task::none();
+                }
+                self.storage.confirming_empty = false;
+                self.storage.checked_large = false;
+                self.storage.removing = true;
+                self.storage.outcome = None;
+                self.storage.excluded = None;
+                let roots = self.roots.clone();
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            // The overview's own target, measured now rather
+                            // than when the page was drawn, and through the
+                            // same executor: the guard sees every path, and
+                            // anything excluded in there stays.
+                            let context = Context::with_roots(roots.clone());
+                            let target = context.measure(catalog::trash::target(&roots));
+                            let plan = Plan::from_targets([&target]);
+                            Executor::applying(&roots)
+                                .with_exclusions(exclusions(&roots))
+                                .run(&plan)
+                        })
+                        .await
+                        .unwrap_or_default()
+                    },
+                    |outcome| Message::TrashEmptied(Box::new(outcome)),
+                )
+            }
+            Message::TrashEmptied(outcome) => {
+                self.storage.outcome = Some((Removal::Emptied, *outcome));
+                self.storage.removing = false;
                 match self.storage.trail.last().cloned() {
                     Some(path) => Task::done(Message::Explore(path)),
                     None => Task::none(),
@@ -1574,6 +1690,7 @@ mod tests {
                     ..Breakdown::default()
                 },
                 largest: Vec::new(),
+                ..Survey::default()
             }),
         ));
 
@@ -1602,6 +1719,7 @@ mod tests {
                 ..Breakdown::default()
             },
             largest: vec![entry("big.iso", false, 4096)],
+            trash: limpid_core::walk::Usage::default(),
         }
     }
 
@@ -1752,6 +1870,7 @@ mod tests {
                     false,
                     900,
                 )],
+                ..Survey::default()
             }),
         ));
 
@@ -1796,6 +1915,7 @@ mod tests {
                 ..Breakdown::default()
             },
             largest: Vec::new(),
+            ..Survey::default()
         };
 
         let (mut state, _dir) = boot();
@@ -2248,5 +2368,110 @@ mod tests {
         let _ = state.update(Message::CheckLargeDelete(true));
         let _ = state.update(Message::DeleteSelected);
         assert!(state.storage.removing);
+    }
+
+    /// The storage page with this much sitting in the trash.
+    fn state_with_trash(bytes: u64) -> (State, tempfile::TempDir) {
+        let (mut state, dir) = state_on_storage();
+        if let Some(survey) = &mut state.storage.survey {
+            survey.trash = limpid_core::walk::Usage {
+                size: Size::new(bytes, bytes),
+                files: 2,
+                ..limpid_core::walk::Usage::default()
+            };
+        }
+        (state, dir)
+    }
+
+    #[test]
+    fn emptying_the_trash_is_offered_only_when_there_is_something_in_it() {
+        let (mut state, _dir) = state_on_storage();
+        let _ = state.update(Message::AskToEmptyTrash);
+        assert!(!state.storage.confirming_empty, "nothing to empty");
+
+        let (mut state, _dir) = state_with_trash(40 << 20);
+        let _ = state.update(Message::AskToEmptyTrash);
+        assert!(state.storage.confirming_empty);
+    }
+
+    #[test]
+    fn the_trash_is_not_emptied_without_its_confirmation() {
+        // The button is how it is usually asked for, not the only way.
+        let (mut state, _dir) = state_with_trash(40 << 20);
+
+        let _ = state.update(Message::EmptyTrash);
+        assert!(!state.storage.removing);
+
+        let _ = state.update(Message::AskToEmptyTrash);
+        let _ = state.update(Message::EmptyTrash);
+        assert!(state.storage.removing);
+        assert!(!state.storage.confirming_empty);
+    }
+
+    #[test]
+    fn a_large_trash_waits_for_the_list_to_be_read() {
+        let (mut state, _dir) = state_with_trash(3 * GIB);
+        let _ = state.update(Message::AskToEmptyTrash);
+        // Set after it opens: opening reads the machine the test runs on.
+        state.storage.capacity = Some(disk(4 * GIB));
+
+        let _ = state.update(Message::EmptyTrash);
+        assert!(!state.storage.removing, "refused until the list is read");
+
+        let _ = state.update(Message::CheckLargeDelete(true));
+        let _ = state.update(Message::EmptyTrash);
+        assert!(state.storage.removing);
+    }
+
+    #[test]
+    fn only_one_confirmation_is_open_at_a_time() {
+        let (mut state, _dir) = state_with_trash(40 << 20);
+        let _ = state.update(Message::ToggleFile(PathBuf::from("/home/x/big.iso")));
+
+        let _ = state.update(Message::AskToEmptyTrash);
+        let _ = state.update(Message::AskToDelete);
+        assert!(state.storage.confirming_delete);
+        assert!(!state.storage.confirming_empty);
+
+        let _ = state.update(Message::AskToEmptyTrash);
+        assert!(state.storage.confirming_empty);
+        assert!(!state.storage.confirming_delete);
+    }
+
+    #[test]
+    fn an_emptied_trash_is_reported_as_emptied() {
+        let (mut state, _dir) = state_with_trash(40 << 20);
+        let _ = state.update(Message::AskToEmptyTrash);
+        let _ = state.update(Message::EmptyTrash);
+
+        let _ = state.update(Message::TrashEmptied(Box::default()));
+
+        assert!(!state.storage.removing);
+        assert!(matches!(state.storage.outcome, Some((Removal::Emptied, _))));
+    }
+
+    #[test]
+    fn emptying_from_the_storage_page_is_the_overviews_own_target() {
+        // So the figure on the button and what goes cannot drift apart.
+        let (state, _dir) = state_with_trash(40 << 20);
+
+        let plan = state.trash_plan();
+
+        assert_eq!(plan.items.len(), 1);
+        assert_eq!(
+            plan.items[0].paths,
+            catalog::trash::target(&state.roots).paths
+        );
+        assert_eq!(plan.items[0].disposal, Disposal::Delete);
+        assert_eq!(plan.expected().on_disk, 40 << 20);
+    }
+
+    #[test]
+    fn moving_files_to_the_trash_is_reported_as_trashed_not_removed() {
+        let (mut state, _dir) = state_on_storage();
+
+        let _ = state.update(Message::SelectionRemoved(Disposal::Trash, Box::default()));
+
+        assert!(matches!(state.storage.outcome, Some((Removal::Trashed, _))));
     }
 }
