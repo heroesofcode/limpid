@@ -189,6 +189,36 @@ impl From<Disposal> for Removal {
     }
 }
 
+/// How an attempt to empty the trash ended.
+#[derive(Debug, Clone)]
+pub enum Emptying {
+    /// It went ahead; the outcome says what was removed.
+    Done(Outcome),
+    /// Measured again at the moment of acting, it had grown past the size
+    /// that needs the list read, and nobody had said they read it. Nothing
+    /// was removed; this is what is in it now.
+    Questioned {
+        /// What is in the trash now.
+        size: Size,
+        /// How many files.
+        files: u64,
+    },
+}
+
+impl Default for Emptying {
+    fn default() -> Self {
+        Self::Done(Outcome::default())
+    }
+}
+
+/// Whether a plan goes back to its confirmation instead of running: it is
+/// large for this disk, and nobody has said they read it. One definition,
+/// asked both before the click, of what was on screen, and after it, of what
+/// was measured at the moment of acting.
+fn questioned(plan: &Plan, capacity: Option<Capacity>, checked: bool) -> bool {
+    !checked && plan.magnitude(capacity).is_some()
+}
+
 #[derive(Default)]
 pub struct Storage {
     /// The path from the starting directory down to the one on screen, which
@@ -220,6 +250,10 @@ pub struct Storage {
     pub outcome: Option<(Removal, Outcome)>,
     /// Whether the confirmation for emptying the trash is up.
     pub confirming_empty: bool,
+    /// Whether the trash turned out larger when it was about to be emptied
+    /// than when the page was measured, so the confirmation says why it is
+    /// back.
+    pub trash_grown: bool,
     /// What was just excluded from this page.
     pub excluded: Option<Excluded>,
     /// Which walk the result on screen belongs to.
@@ -396,8 +430,8 @@ pub enum Message {
     CancelEmptyTrash,
     /// Empty the trash.
     EmptyTrash,
-    /// Emptying the trash finished.
-    TrashEmptied(Box<Outcome>),
+    /// Emptying the trash finished, or was sent back to its confirmation.
+    TrashEmptied(Box<Emptying>),
     /// Nothing happened worth reacting to.
     Nothing,
     /// Show a file in the desktop's file manager.
@@ -669,6 +703,7 @@ impl State {
                 }
                 self.storage.confirming_delete = false;
                 self.storage.confirming_empty = false;
+                self.storage.trash_grown = false;
                 self.storage.excluded = None;
                 self.storage.working = true;
                 self.storage.survey = None;
@@ -773,6 +808,7 @@ impl State {
                     .is_some_and(|survey| !survey.trash.is_empty());
                 self.storage.confirming_delete = false;
                 self.storage.confirming_empty = has_trash;
+                self.storage.trash_grown = false;
                 // Asked every time it opens, as for every other large plan.
                 self.storage.checked_large = false;
                 self.storage.capacity = volume::capacity(&self.roots.home);
@@ -780,6 +816,7 @@ impl State {
             }
             Message::CancelEmptyTrash => {
                 self.storage.confirming_empty = false;
+                self.storage.trash_grown = false;
                 self.storage.checked_large = false;
                 Task::none()
             }
@@ -787,10 +824,17 @@ impl State {
                 // Refused here and not only by a greyed-out button, the same
                 // as every other permanent removal.
                 if !self.storage.confirming_empty
-                    || (self.trash_magnitude().is_some() && !self.storage.checked_large)
+                    || questioned(
+                        &self.trash_plan(),
+                        self.storage.capacity,
+                        self.storage.checked_large,
+                    )
                 {
                     return Task::none();
                 }
+                // Taken before it is cleared: the yes given here is what the
+                // second check, at the moment of acting, is measured against.
+                let checked = self.storage.checked_large;
                 self.storage.confirming_empty = false;
                 self.storage.checked_large = false;
                 self.storage.removing = true;
@@ -807,22 +851,55 @@ impl State {
                             let context = Context::with_roots(roots.clone());
                             let target = context.measure(catalog::trash::target(&roots));
                             let plan = Plan::from_targets([&target]);
-                            Executor::applying(&roots)
-                                .with_exclusions(exclusions(&roots))
-                                .run(&plan)
+
+                            // Rule 13 at the moment of acting, like rule 2
+                            // for paths. The figure the click was given is
+                            // from when the page was measured, and anything
+                            // can have been put in the trash since; a trash
+                            // that is now out of proportion goes back to be
+                            // read rather than going.
+                            if questioned(&plan, volume::capacity(&roots.home), checked) {
+                                return Emptying::Questioned {
+                                    size: target.size,
+                                    files: target.files,
+                                };
+                            }
+
+                            Emptying::Done(
+                                Executor::applying(&roots)
+                                    .with_exclusions(exclusions(&roots))
+                                    .run(&plan),
+                            )
                         })
                         .await
                         .unwrap_or_default()
                     },
-                    |outcome| Message::TrashEmptied(Box::new(outcome)),
+                    |emptying| Message::TrashEmptied(Box::new(emptying)),
                 )
             }
-            Message::TrashEmptied(outcome) => {
-                self.storage.outcome = Some((Removal::Emptied, *outcome));
+            Message::TrashEmptied(emptying) => {
                 self.storage.removing = false;
-                match self.storage.trail.last().cloned() {
-                    Some(path) => Task::done(Message::Explore(path)),
-                    None => Task::none(),
+                match *emptying {
+                    Emptying::Done(outcome) => {
+                        self.storage.outcome = Some((Removal::Emptied, outcome));
+                        match self.storage.trail.last().cloned() {
+                            Some(path) => Task::done(Message::Explore(path)),
+                            None => Task::none(),
+                        }
+                    }
+                    Emptying::Questioned { size, files } => {
+                        // Back to the confirmation, at the size it is now,
+                        // with the large-plan question in it.
+                        if let Some(survey) = &mut self.storage.survey {
+                            survey.trash.size = size;
+                            survey.trash.files = files;
+                        }
+                        self.storage.capacity = volume::capacity(&self.roots.home);
+                        self.storage.checked_large = false;
+                        self.storage.confirming_empty = true;
+                        self.storage.trash_grown = true;
+                        Task::none()
+                    }
                 }
             }
             Message::Explored(generation, survey) => {
@@ -2464,6 +2541,53 @@ mod tests {
         );
         assert_eq!(plan.items[0].disposal, Disposal::Delete);
         assert_eq!(plan.expected().on_disk, 40 << 20);
+    }
+
+    #[test]
+    fn a_plan_is_questioned_only_when_large_and_not_yet_read() {
+        let (state, _dir) = state_with_trash(3 * GIB);
+        let large = state.trash_plan();
+        let (state, _dir) = state_with_trash(40 << 20);
+        let small = state.trash_plan();
+        let full = Some(disk(4 * GIB));
+
+        assert!(questioned(&large, full, false));
+        assert!(!questioned(&large, full, true), "the list was read");
+        assert!(!questioned(&small, full, false), "not large");
+    }
+
+    #[test]
+    fn a_trash_that_grew_past_the_limit_goes_back_to_be_read() {
+        // On screen it was small, so no tick was asked for. By the time it
+        // was measured again to be emptied, something had put 3 GiB in it.
+        let (mut state, _dir) = state_with_trash(40 << 20);
+        let _ = state.update(Message::AskToEmptyTrash);
+        let _ = state.update(Message::EmptyTrash);
+        assert!(state.storage.removing);
+
+        let _ = state.update(Message::TrashEmptied(Box::new(Emptying::Questioned {
+            size: Size::new(3 * GIB, 3 * GIB),
+            files: 9,
+        })));
+
+        assert!(!state.storage.removing);
+        assert!(state.storage.outcome.is_none(), "nothing was removed");
+        assert!(state.storage.confirming_empty, "asked again");
+        assert!(state.storage.trash_grown, "and says why");
+        assert!(!state.storage.checked_large);
+        let trash = &state.storage.survey.as_ref().unwrap().trash;
+        assert_eq!(trash.size.on_disk, 3 * GIB);
+        assert_eq!(trash.files, 9);
+    }
+
+    #[test]
+    fn opening_the_confirmation_afresh_forgets_why_it_last_came_back() {
+        let (mut state, _dir) = state_with_trash(40 << 20);
+        state.storage.trash_grown = true;
+
+        let _ = state.update(Message::AskToEmptyTrash);
+
+        assert!(!state.storage.trash_grown);
     }
 
     #[test]
