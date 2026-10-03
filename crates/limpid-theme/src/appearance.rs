@@ -101,10 +101,10 @@ pub fn watch() -> zbus::Result<Watcher> {
                 let Ok(scheme) = u32::try_from(&value) else {
                     continue;
                 };
-                if let Some(mode) = mode_from_scheme(scheme) {
-                    if tx.send(mode).is_err() {
-                        break;
-                    }
+                if let Some(mode) = mode_from_scheme(scheme)
+                    && tx.send(mode).is_err()
+                {
+                    break;
                 }
             }
         })

@@ -253,7 +253,7 @@ yay -S limpid
 Or from source:
 
 ```sh
-mise build
+mise run build
 sudo ./mise-tasks/install
 ```
 
@@ -271,9 +271,13 @@ everything else works without it.
 ## Building
 
 ```sh
-mise build  # cargo build --release --workspace
-mise check  # fmt, clippy with warnings denied, and the tests
+mise run build   # cargo build --release --workspace --locked
+mise run check   # rustfmt, clippy with warnings denied, and the tests
+mise run audit   # supply chain, spelling and unused dependencies
 ```
+
+`mise run audit` needs `cargo-deny`, `cargo-machete` and `typos`:
+`cargo binstall cargo-deny cargo-machete typos-cli`.
 
 ## License
 

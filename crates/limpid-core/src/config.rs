@@ -370,6 +370,11 @@ impl Store {
             .and_then(|()| std::fs::rename(&staged, &self.path));
 
         if let Err(error) = written {
+            #[expect(
+                clippy::disallowed_methods,
+                reason = "removes only the staging file this function just \
+                          wrote, so a failed save leaves nothing behind"
+            )]
             let _ = std::fs::remove_file(&staged);
             return Err(SaveError::Io {
                 path: self.path.clone(),

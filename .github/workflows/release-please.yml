@@ -12,19 +12,29 @@ on:
         required: true
         type: string
 
-permissions:
-  contents: write
-  pull-requests: write
+# Nothing by default. Each job asks for what it uses, so the one that only
+# builds cannot also rewrite pull requests.
+permissions: {}
+
+# Two pushes in quick succession must not race to cut the same release.
+concurrency:
+  group: release-please
+  cancel-in-progress: false
 
 jobs:
   release-please:
+    name: release pull request
     runs-on: ubuntu-latest
     if: github.event_name == 'push'
+    timeout-minutes: 10
+    permissions:
+      contents: write # commit the version bump, create the tag and release
+      pull-requests: write # open and update the release pull request
     outputs:
       released: ${{ steps.release.outputs.release_created }}
       tag: ${{ steps.release.outputs.tag_name }}
     steps:
-      - uses: googleapis/release-please-action@v5
+      - uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
         id: release
         with:
           # GitHub does not trigger workflows for events raised by the
@@ -40,14 +50,26 @@ jobs:
     # by the default token does not start a separate workflow either, so the
     # binaries are built here, in the run that created the release, rather
     # than in one waiting to be triggered by it.
+    name: release binaries
     needs: [release-please]
     if: always() && (needs.release-please.outputs.released == 'true' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: write # upload the tarball and its checksum to the release
+      id-token: write # the OIDC token that signs the provenance attestation
+      attestations: write # store that attestation against the repository
+    env:
+      TAG: ${{ inputs.tag || needs.release-please.outputs.tag }}
     steps:
-      - uses: actions/checkout@0c366fd6a839edf440554fa01a7085ccba70ac98
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.tag || needs.release-please.outputs.tag }}
+          ref: ${{ env.TAG }}
+          persist-credentials: false
 
+      # Inline rather than the shared action in .github/actions: this job
+      # checks out the tag being built, and a tag cut before that action
+      # existed would not have it.
       - name: Install system dependencies
         run: |
           sudo apt-get update
@@ -55,16 +77,18 @@ jobs:
             libwayland-dev libxkbcommon-dev libvulkan-dev \
             libx11-dev libxcursor-dev libxrandr-dev libxi-dev
 
-      - uses: Swatinem/rust-cache@f51f967e158417aafa338a1e46ab22095f07aa01
+      - run: rustup toolchain install
 
+      # No build cache. What ships is a binary polkit elevates to root, and it
+      # is built from the tagged source alone, with nothing carried over from
+      # an earlier run.
       - name: Build
         run: cargo build --release --workspace --locked
 
       - name: Package
         id: package
         run: |
-          tag="${{ inputs.tag || needs.release-please.outputs.tag }}"
-          staging="limpid-${tag#v}-x86_64-linux"
+          staging="limpid-${TAG#v}-x86_64-linux"
           # The binaries go where the install task looks for them, so that
           # `./mise-tasks/install` inside the extracted tarball is the same
           # command as in a checkout. The 0.3.0 tarball put them at the top
@@ -72,14 +96,44 @@ jobs:
           mkdir -p "$staging/target/release"
           cp target/release/limpid target/release/limpid-cli \
              target/release/limpid-helper "$staging/target/release/"
-          cp -r data mise-tasks README.md LICENSE "$staging/"
+          cp -r data README.md LICENSE "$staging/"
+          # Whichever installer the tag has. A rebuild of a tag cut before
+          # mise-tasks existed has a Makefile instead, and must still package.
+          for installer in mise-tasks Makefile; do
+            if [ -e "$installer" ]; then cp -r "$installer" "$staging/"; fi
+          done
           tar -czf "${staging}.tar.gz" "$staging"
           sha256sum "${staging}.tar.gz" > "${staging}.tar.gz.sha256"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "tarball=${staging}.tar.gz" >> "$GITHUB_OUTPUT"
+
+      # The attestation names the commit this run was started from, not the
+      # one checked out. On a release those are the same commit. On a manual
+      # rebuild of an older tag dispatched from main they are not, and an
+      # attestation then would say the tarball came from source it did not
+      # come from — so none is made. To attest a rebuild, dispatch it on the
+      # tag itself: `gh workflow run release-please.yml --ref vX.Y.Z -f tag=vX.Y.Z`.
+      - name: Check the attestation would be true
+        id: provenance
+        run: |
+          built=$(git rev-parse HEAD)
+          if [ "$built" = "$GITHUB_SHA" ]; then
+            echo "attest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::Built $built but this run is for $GITHUB_SHA; no provenance attestation."
+            echo "attest=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # A checksum says the download is the file that was uploaded; this says
+      # the file was built by this workflow, from this commit. Anyone can
+      # check it with `gh attestation verify <tarball> --repo heroesofcode/limpid`.
+      - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: steps.provenance.outputs.attest == 'true'
+        with:
+          subject-path: ${{ steps.package.outputs.tarball }}
 
       - name: Attach to the release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release upload "${{ steps.package.outputs.tag }}" \
+          gh release upload "$TAG" \
             limpid-*.tar.gz limpid-*.sha256 --clobber

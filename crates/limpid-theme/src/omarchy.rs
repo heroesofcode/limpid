@@ -270,6 +270,11 @@ fn resolve_mode(keys: &HashMap<String, String>, light_marker: bool, background: 
 /// Omarchy's own scripts treat fontconfig as authoritative and do not update
 /// the GNOME font settings, so reading gsettings here would return a stale
 /// answer. Falling back to `None` lets the caller choose its own default.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "a read-only query of fontconfig, with fixed arguments and no \
+              input from the theme or the user"
+)]
 pub fn monospace_family() -> Option<String> {
     let output = std::process::Command::new("fc-match")
         .args(["monospace", "-f", "%{family}"])

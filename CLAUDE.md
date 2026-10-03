@@ -52,12 +52,38 @@ before calling any layout work finished.
 ## Working here
 
 ```sh
-mise build  # cargo build --release --workspace
-mise check  # fmt, clippy with warnings denied, and the tests
+mise run build   # cargo build --release --workspace --locked
+mise run check   # rustfmt, clippy with warnings denied, and the tests
+mise run audit   # supply chain, spelling and unused dependencies
 ```
 
-`mise check` must pass before anything is considered done. CI runs the same
-three steps and treats warnings as errors.
+`mise run check` must pass before anything is considered done, and `mise run
+audit` before anything touches dependencies. `audit` needs `cargo-deny`,
+`cargo-machete` and `typos` on `PATH`. The tasks live in `mise.toml`; `mise
+tasks` lists them. Always `mise run`: a bare `mise fmt` or `mise install` is
+one of mise's own commands, not a task here.
+
+CI (`.github/workflows/ci.yml`) runs the same tasks for rustfmt, clippy, the
+tests and the release build, one job each, plus the minimum Rust version, the
+documentation, the supply chain, and a security audit of the workflows
+themselves. Every job feeds one check named `ci`, so a new job must be added
+to its `needs`, and its name must not change. Main requires that and one more,
+`pull request title`, which lives in `pr-title.yml` so that editing a title
+reruns only the title check. Main also requires every review conversation to
+be resolved: a finding is fixed, or answered and then resolved, never left.
+
+Two configuration files are part of the safety model, not housekeeping:
+
+- **`clippy.toml`** forbids removing files, canonicalising paths and spawning
+  processes anywhere but the places allowed to. A new call fails the build,
+  with the reason in the error. The legitimate sites carry
+  `#[expect(clippy::disallowed_methods, reason = "...")]`, and the reason has
+  to explain why that site is safe.
+- **`deny.toml`** is the supply-chain policy: advisories, licences, and where
+  every dependency comes from. Each exception says why it exists.
+
+Loosening either needs a reason in the pull request, the same as widening a
+`Guard` boundary.
 
 Point the whole engine at a fixture instead of the real filesystem with
 `--root`, or `LIMPID_ROOT`:
@@ -94,4 +120,6 @@ request is refused rather than quietly aimed at the wrong machine.
   the changelog, not in code comments. No `Co-Authored-By` trailer naming an
   assistant, no "generated with" footer. The project's history reads as the
   work of its authors, because that is what it is. Describe what a change
-  does, never who or what produced it.
+  does, never who or what produced it. This governs what contributors write;
+  the review bot's own comments, summaries and commits are its own, and are
+  labelled as such.

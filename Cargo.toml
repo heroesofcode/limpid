@@ -7,7 +7,8 @@ name = "limpid"
 description = "A system cleaner and disk-space analyser for Linux"
 version = "0.3.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version.workspace = true
+publish.workspace = true
 license = "MIT"
 repository = "https://github.com/heroesofcode/limpid"
 homepage = "https://github.com/heroesofcode/limpid"
@@ -21,11 +22,10 @@ path = "src/main.rs"
 [dependencies]
 limpid-core.workspace = true
 limpid-theme.workspace = true
-anyhow.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
-tokio = { version = "1", features = ["rt", "time"] }
+tokio ={ version = "1", features = ["rt", "time"] }
 zbus = "5.11"
 iced = { version = "0.14", features = ["canvas", "tokio", "svg", "advanced"] }
 
@@ -43,7 +43,14 @@ members = [
 
 [workspace.package]
 edition = "2024"
-rust-version = "1.85"
+# The oldest compiler the dependency tree builds with, not the oldest that
+# understands edition 2024: Iced 0.14 and wgpu 27 need 1.88. CI checks this
+# with that exact toolchain, so it cannot drift back into a promise.
+rust-version = "1.88"
+# Nothing here goes to crates.io. Saying so stops an accidental
+# `cargo publish`, and is what lets cargo-deny accept the path dependencies
+# between these crates without a version.
+publish = false
 license = "MIT"
 repository = "https://github.com/heroesofcode/limpid"
 homepage = "https://github.com/heroesofcode/limpid"
@@ -65,6 +72,34 @@ serde_json = "1.0"
 toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Lints every crate inherits, so that a new one cannot forget them. `make
+# check` and CI deny warnings, so `warn` here still fails the build there; it
+# only keeps a local `cargo build` usable while something is half-written.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+# Leftovers from a debugging session.
+dbg_macro = "warn"
+todo = "warn"
+unimplemented = "warn"
+# A cleaner that panics halfway through a plan has carried out part of it.
+# Tests may unwrap; clippy.toml says so.
+unwrap_used = "warn"
+panic = "warn"
+# Slicing a string by byte offset panics inside a multi-byte character, and
+# what Limpid reads — file names, theme files — was written by someone else.
+string_slice = "warn"
+# An exception to a lint says why, the same as any other comment here.
+allow_attributes_without_reason = "warn"
+# Removing files, resolving symlinks and spawning processes are confined to
+# the places allowed to do them. The list, and the reasons, are in
+# clippy.toml.
+disallowed_methods = "deny"
+
+[lints]
+workspace = true
 
 [profile.release]
 opt-level = 3

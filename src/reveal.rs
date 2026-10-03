@@ -14,6 +14,11 @@ use std::path::Path;
 /// Best effort. There is no useful way to report "no file manager is
 /// installed" to someone who just clicked a small button, and nothing is
 /// lost by the attempt.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "xdg-open on the folder holding something the person is looking \
+              at, only when no file manager answers over D-Bus"
+)]
 pub fn in_file_manager(path: &Path) {
     if show_and_select(path).is_ok() {
         return;

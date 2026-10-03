@@ -1914,7 +1914,6 @@ dependencies = [
 name = "limpid"
 version = "0.3.0"
 dependencies = [
- "anyhow",
  "iced",
  "limpid-core",
  "limpid-theme",
@@ -1934,7 +1933,6 @@ dependencies = [
  "limpid-core",
  "limpid-theme",
  "serde_json",
- "tracing",
  "tracing-subscriber",
 ]
 
@@ -1942,7 +1940,6 @@ dependencies = [
 name = "limpid-core"
 version = "0.3.0"
 dependencies = [
- "anyhow",
  "dirs",
  "ignore",
  "rayon",
@@ -1960,9 +1957,7 @@ dependencies = [
 name = "limpid-helper"
 version = "0.3.0"
 dependencies = [
- "anyhow",
  "limpid-core",
- "serde",
  "serde_json",
  "tempfile",
 ]
@@ -1971,13 +1966,11 @@ dependencies = [
 name = "limpid-theme"
 version = "0.3.0"
 dependencies = [
- "anyhow",
  "dirs",
  "notify",
  "tempfile",
  "thiserror 2.0.21",
  "toml",
- "tracing",
  "zbus",
 ]
 

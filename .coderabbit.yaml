@@ -1,0 +1,218 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# Automated pull request review, by CodeRabbit (free for public repositories).
+#
+# CI already proves what can be proved mechanically: formatting, clippy with
+# the project's own disallowed methods, tests, the supply-chain policy, the
+# minimum Rust version. What it cannot prove is that a change keeps to the
+# reasoning in .claude/ — that a new scanner chose the right risk, that a
+# layout degrades by rearranging, that a comment says why. That is what this
+# review is pointed at.
+
+language: en-US
+tone_instructions: >-
+  Be direct and specific. Cite the invariant or the file a concern comes from.
+  Skip praise and restating the diff. If something is fine, say nothing.
+
+knowledge_base:
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - CLAUDE.md
+      - .claude/safety.md
+      - .claude/responsive-ui.md
+      - .claude/architecture.md
+
+chat:
+  auto_reply: true
+
+reviews:
+  profile: chill
+  # Request changes while findings are open, and approve once the latest
+  # commit has been reviewed, every comment is resolved and no pre-merge check
+  # fails. That approval is the one signal that the review of the current
+  # commit is finished, and it is what auto-merge waits for.
+  request_changes_workflow: true
+  high_level_summary: true
+  poem: false
+  in_progress_fortune: false
+  sequence_diagrams: false
+  suggested_reviewers: false
+
+  auto_review:
+    enabled: true
+    drafts: false
+    # release-please's own pull requests are a version bump and a changelog
+    # it generated from titles that were already reviewed.
+    ignore_title_keywords:
+      - "chore(main): release"
+
+  path_filters:
+    - "!Cargo.lock"
+    - "!CHANGELOG.md"
+    - "!.release-please-manifest.json"
+    - "!docs/**/*.png"
+    - "!target/**"
+
+  path_instructions:
+    - path: "crates/limpid-helper/**"
+      instructions: |
+        This binary runs as root through polkit. Hold it to the strictest
+        standard in the repository.
+        - It must contain no filename parsing, no symlink resolution and no
+          safety judgement. Those belong on the unprivileged side.
+        - Every subprocess runs with `env_clear()` and the fixed PATH. Flag any
+          environment inherited from the caller.
+        - Flag any new dependency. What runs as root is kept small enough to
+          read in one sitting.
+        - Request parameters are validated here even though the caller
+          validates them too; this copy is the one that counts.
+        - `docker system prune` never gets `--volumes`.
+
+    - path: "crates/limpid-core/src/privileged.rs"
+      instructions: |
+        No path crosses this boundary. Flag any field added to `Request` or
+        `Operation` that carries a path, a glob, a pattern, a free-form string,
+        or anything a path could be reconstructed from. Operations are whole
+        policies with bounded numeric parameters, validated on both sides.
+
+    - path: "crates/limpid-core/src/guard.rs"
+      instructions: |
+        The last check before anything is removed, and an independent second
+        opinion. Flag:
+        - a boundary added to `Guard::new` without a test that the boundary
+          itself is refused;
+        - boundaries derived from what scanners declare, instead of written
+          out by hand;
+        - any resolving of paths (canonicalize, read_link followed by a
+          check) where the current code refuses instead;
+        - checks moved from the moment of acting to the moment of planning;
+        - a `PROTECTED_NAMES` entry removed, or a new browser tree admitted
+          without asking whether its credential store needs an entry.
+
+    - path: "crates/limpid-core/src/execute.rs"
+      instructions: |
+        Dry run is the default and the destructive path must be asked for by
+        name; there is no boolean to pass the wrong way round. Every path is
+        put past the guard at the moment it is acted on. Directories are
+        emptied, not removed. A dry run and a real run must agree on the
+        figure. Flag anything that weakens any of these.
+
+    - path: "crates/limpid-core/src/catalog/**"
+      instructions: |
+        A scanner is a list of paths and an explanation; it must not know how
+        to delete anything. Check the checklist in .claude/safety.md: the right
+        `Kind` (it decides delete versus trash), the right `Risk` (`Safe` means
+        regenerates with no user-visible consequence; a slow first launch is
+        `Review`), a named `Operation` for anything needing root, and a test
+        against a fixture built with `Roots::under`, never the real home.
+
+    - path: "src/**"
+      instructions: |
+        The GUI deletes nothing: it builds a `Plan` and hands it to
+        limpid-core. Long work goes to `spawn_blocking`; the frame loop never
+        stalls.
+
+    - path: "{src/layout.rs,src/view/**,src/widget/**}"
+      instructions: |
+        Limpid lives in a tiling window manager and can be given 288 px.
+        Apply .claude/responsive-ui.md:
+        - no layout assumes a width; every view takes `Metrics` and asks it;
+        - a new breakpoint carries a comment saying what stops fitting there,
+          and a test in src/layout.rs at 288, 576 and 1020 px;
+        - degradation is by rearranging, never clipping, overflowing or a
+          horizontal scrollbar;
+        - text that overflows instead of wrapping usually means a `Shrink`
+          ancestor; `row!` and `column!` default to it.
+
+    - path: ".github/workflows/**"
+      instructions: |
+        - Every `uses:` is pinned to a full commit SHA with a version comment.
+        - Permissions are granted per job, at the minimum, and the workflow
+          default is read-only or none.
+        - No `${{ }}` expansion inside `run:`; pass values through `env:`.
+        - Main requires two checks: the `ci` job in ci.yml, whose name must
+          not change and whose `needs` must list every other CI job, and the
+          `pull request title` job in pr-title.yml.
+
+    - path: "{clippy.toml,deny.toml,Cargo.toml,crates/*/Cargo.toml}"
+      instructions: |
+        These files are part of the safety model. Flag any change that
+        loosens it — a method taken off `disallowed-methods`, an advisory
+        ignored, a licence or a source allowed, a lint lowered — unless the
+        pull request says why. A new dependency deserves a sentence on what it
+        is for and why the standard library or an existing dependency does not
+        do it.
+
+    - path: "**/*.rs"
+      instructions: |
+        Comments explain why, not what; a comment restating the line below is
+        noise. Test names are sentences describing behaviour. An exception to
+        a lint is `#[expect(..., reason = "...")]`. If a change alters
+        behaviour the README describes, the README and the test that backs it
+        change in the same pull request.
+
+  pre_merge_checks:
+    docstrings:
+      # `missing_docs` is enforced by the compiler where it matters, the
+      # public API of the libraries. A coverage percentage over private
+      # functions and tests would only be noise.
+      mode: "off"
+    title:
+      mode: warning
+      requirements: >-
+        A Conventional Commit, because release-please builds the changelog and
+        the version from squash-merged titles: `type(optional scope): summary`,
+        with type one of feat, fix, docs, chore, refactor, perf, test, build,
+        ci, style or revert, and a lowercase summary in the imperative.
+    issue_assessment:
+      mode: "off"
+    custom_checks:
+      - name: Safety invariants
+        mode: error
+        instructions: |
+          Fail if the pull request does any of the following without saying
+          why in its description:
+          1. Adds a boundary to `Guard::new` in crates/limpid-core/src/guard.rs
+             without a test asserting that the boundary itself is refused.
+          2. Adds to `Request` or `Operation` in
+             crates/limpid-core/src/privileged.rs a field whose type can hold
+             a path or arbitrary text.
+          3. Adds a dependency to crates/limpid-helper/Cargo.toml.
+          4. Removes an entry from `disallowed-methods` in clippy.toml, or
+             adds an `#[expect(clippy::disallowed_methods)]` whose reason does
+             not explain why that call site is safe.
+          5. Makes the executor default to applying rather than a dry run, or
+             changes `Disposal::for_kind` so that something a person would
+             have to recreate is deleted instead of trashed.
+          Pass otherwise.
+      - name: Responsive layout
+        mode: warning
+        instructions: |
+          Only applies if the pull request changes src/layout.rs, src/view/
+          or src/widget/. Fail if it introduces a width or breakpoint as a
+          literal instead of asking `Metrics`, adds a view function that does
+          not take `Metrics`, or adds a `Metrics` predicate or breakpoint
+          without a test in src/layout.rs. Pass otherwise, and pass when none
+          of those paths changed.
+
+  tools:
+    # CI runs clippy with the project's configuration and system libraries;
+    # a second run without them would only report build failures.
+    clippy:
+      enabled: false
+    # Prose nitpicks on documentation written in a deliberate style.
+    languagetool:
+      enabled: false
+    markdownlint:
+      enabled: false
+    gitleaks:
+      enabled: true
+    zizmor:
+      enabled: true
+    actionlint:
+      enabled: true
+    shellcheck:
+      enabled: true
+    osvScanner:
+      enabled: true

@@ -1,0 +1,74 @@
+# Supply-chain policy, enforced by `cargo deny check` in CI.
+#
+# Limpid ships a binary that polkit elevates to root. What it is built from is
+# part of the safety model, not housekeeping: a dependency is code that runs
+# with whatever authority the program has.
+
+[graph]
+# Linux is the only platform Limpid builds for, on the two architectures the
+# PKGBUILD lists. Without this, the Windows and macOS halves of winit and wgpu
+# are counted too, and an advisory or a licence on a crate that is never
+# compiled here would block a change that cannot reach it.
+targets = ["x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"]
+all-features = true
+
+[advisories]
+# A yanked release was pulled for a reason, and that reason is rarely
+# published alongside it.
+yanked = "deny"
+# Spelled out rather than left to the defaults, which differ: unmaintained
+# crates fail at any depth, but unsound ones only when a workspace crate
+# depends on them directly — so an unsound crate deep in the GUI toolkit
+# would pass. Vulnerabilities fail at any depth whatever is set here.
+unsound = "all"
+unmaintained = "all"
+# Each exception below is reachable only through the GUI toolkit, has no
+# release to move to that the toolkit accepts, and is to be revisited when
+# Iced updates. An unsound one is excepted only when the condition it needs
+# cannot arise here, and the reason says why. The weekly scheduled run is
+# what notices a new advisory without a pull request.
+ignore = [
+    { id = "RUSTSEC-2026-0206", reason = "rustybuzz is unmaintained. Reached only through iced 0.14's SVG rendering (iced_tiny_skia, iced_wgpu -> resvg -> usvg), with no maintained release to move to." },
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser is unmaintained. Reached only through iced 0.14's font stack, with no maintained release to move to." },
+    { id = "RUSTSEC-2026-0253", reason = "lru 0.16 LruCache::pop is unsound only when a key's Drop panics and the panic is caught with catch_unwind. Reached only through iced_wgpu -> cryoglyph 0.1, whose single cache is keyed by cosmic-text's CacheKey, a Copy type and so unable to implement Drop; Limpid never calls catch_unwind. The fix is in lru 0.18, which cryoglyph 0.1 does not accept." },
+]
+
+[licenses]
+# Permissive licences, plus MPL-2.0, which is file-level copyleft and asks
+# only that the MPL-licensed files themselves stay available — true of
+# anything on crates.io. Several dependencies are dual-licensed with a GPL or
+# LGPL arm; cargo-deny takes the permissive one, and this list is what makes
+# sure one is always there to take.
+allow = [
+    "0BSD",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "CC0-1.0",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+confidence-threshold = 0.93
+
+[bans]
+# Iced's dependency tree carries several versions of the same crates, and
+# none of it is Limpid's to choose. Denying duplicates would block every
+# update; warning keeps them visible.
+multiple-versions = "warn"
+# A `*` version requirement takes whatever is newest on the day of the build.
+# The workspace's own path dependencies are exempt: they are never published,
+# so there is nothing for a version to select between.
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+# Everything comes from crates.io. A git dependency or a second registry is a
+# decision, and has to be made here, deliberately.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]

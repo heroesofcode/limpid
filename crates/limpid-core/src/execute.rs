@@ -199,14 +199,14 @@ impl Executor {
         // reads it and presses the button, and removing a live profile does
         // not free the space — it can make the browser discard the whole
         // database rather than the part that was asked for.
-        if let Some(directory) = &item.requires_idle {
-            if let Some(holder) = crate::browser::holder_of(directory) {
-                outcome.problems.push(Problem::InUse {
-                    item: item.name.clone(),
-                    holder: format!("{} ({})", holder.name, holder.pid),
-                });
-                return outcome;
-            }
+        if let Some(directory) = &item.requires_idle
+            && let Some(holder) = crate::browser::holder_of(directory)
+        {
+            outcome.problems.push(Problem::InUse {
+                item: item.name.clone(),
+                holder: format!("{} ({})", holder.name, holder.pid),
+            });
+            return outcome;
         }
 
         for path in &item.paths {
@@ -316,6 +316,12 @@ impl Executor {
     }
 
     /// Remove one entry, counting what it was worth.
+    #[expect(
+        clippy::disallowed_methods,
+        reason = "the executor's one point of removal, reached only from \
+                  `run_item` once the guard has accepted the path or the \
+                  directory it sits in"
+    )]
     fn remove(&self, path: &Path, disposal: Disposal) -> Outcome {
         let mut outcome = Outcome::default();
 
