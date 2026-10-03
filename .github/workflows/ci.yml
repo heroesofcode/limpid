@@ -33,4 +33,4 @@ jobs:
         run: mise run check
 
       - name: Build release
-        run: cargo build --workspace --release
+        run: mise run build
