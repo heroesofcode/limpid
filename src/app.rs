@@ -1022,7 +1022,7 @@ impl State {
                             // prompt for nothing would be its own kind of
                             // rude.
                             let elevated = plan.needs_elevation().then(|| {
-                                Runner::new()
+                                Runner::for_roots(&roots)
                                     .run(&Request {
                                         operations: plan.operations.clone(),
                                     })
