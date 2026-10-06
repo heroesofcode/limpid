@@ -188,6 +188,9 @@ pub struct Runner {
     helper: std::path::PathBuf,
     elevate: bool,
     sandboxed: bool,
+    /// Where what the helper did is written down. The helper itself never
+    /// sees it: it is told what to do, and this side keeps the record.
+    history: Option<crate::history::History>,
 }
 
 /// Why a privileged run did not happen.
@@ -231,6 +234,7 @@ impl Runner {
             helper: Self::locate(),
             elevate: true,
             sandboxed: roots.is_sandboxed(),
+            history: Some(crate::history::History::at(roots)),
         }
     }
 
@@ -241,6 +245,7 @@ impl Runner {
             helper: helper.into(),
             elevate: false,
             sandboxed: false,
+            history: None,
         }
     }
 
@@ -267,6 +272,7 @@ impl Runner {
         use std::process::{Command, Stdio};
 
         request.validate()?;
+        let at = crate::history::now();
 
         if self.sandboxed {
             return Err(RunError::Sandboxed);
@@ -313,14 +319,24 @@ impl Runner {
             return Err(RunError::Declined);
         }
 
-        serde_json::from_slice(&output.stdout).map_err(|error| {
+        let report: Report = serde_json::from_slice(&output.stdout).map_err(|error| {
             let said = String::from_utf8_lossy(&output.stderr).trim().to_owned();
             RunError::Unreadable(if said.is_empty() {
                 error.to_string()
             } else {
                 said
             })
-        })
+        })?;
+
+        // Logged rather than returned: nothing the helper does can be put
+        // back, so a line missing here loses a record, not a way back.
+        if let Some(history) = &self.history
+            && let crate::history::Recorded::Failed(why) = history.record_operations(at, &report)
+        {
+            tracing::warn!("{why}");
+        }
+
+        Ok(report)
     }
 }
 

@@ -103,6 +103,21 @@ happened.
 
 ![The storage view](docs/storage.png)
 
+## What it removed
+
+Every run that removes anything is written down: what it was, how large,
+whether it went to the trash or was removed for good, and when. The History
+page and `limpid-cli history` list it, newest first. The executor writes it
+itself, so nothing goes through Limpid without a record, and a dry run writes
+nothing because it removed nothing. If the record cannot be written, the run
+says so.
+
+It is kept in `~/.local/state/limpid/history.jsonl`, one line per run, and
+Limpid only ever adds to the end of it: a crash costs at most the line being
+written, and a line that cannot be read costs only itself. Whatever went to
+the trash is recorded under the trash's own name for it, so it can be found
+there again even when the trash had to rename it.
+
 ## Using it
 
 ```sh
@@ -114,6 +129,8 @@ limpid-cli clean --apply     # actually do it
 limpid-cli clean --risk review --apply
 limpid-cli storage                     # where the space went
 limpid-cli storage --path ~/Downloads
+limpid-cli history                     # what was removed, and where it went
+limpid-cli history --json
 limpid-cli config                      # what Limpid remembers
 limpid-cli exclude ~/.cache/thumbnails # never offer or remove this
 limpid-cli exclude --remove ~/.cache/thumbnails
@@ -212,6 +229,8 @@ some capability for it:
 - **Build output is found by a rule, and the rule is asked again** at the
   moment of removal, like everything else: a `Cargo.toml` deleted since the
   scan and the `target/` beside it is no longer build output.
+- **Every removal is written down**, by the part of Limpid that does the
+  removing rather than by whichever window asked for it.
 - **An exclusion is a refusal, not a filter.** The scanners leave excluded
   paths out, and the executor refuses them too, so a selection made before
   the exclusion was added still cannot remove what was excluded.
@@ -226,8 +245,8 @@ PKGBUILD.
 
 | Release | What it adds |
 |---|---|
-| 0.4 | Settings and exclusions ✓ · project build artifacts · folders in the storage view · the first AUR release |
-| 0.5 | History of every run, and undo |
+| 0.4 | Settings and exclusions ✓ · project build artifacts ✓ · folders in the storage view ✓ · the first AUR release |
+| 0.5 | History of every run ✓ · undo from the trash · deleting folders for good · the safety rules on screen |
 | 0.6 | Duplicate files · large files nobody has opened in years |
 | 0.7 | Exact accounting: what a removal really frees on btrfs, and a check afterwards |
 | 0.8 | Reclaiming space without deleting anything: deduplication, recompression, snapshot thinning |

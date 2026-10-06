@@ -7,6 +7,7 @@ use iced::{Alignment, Element, Length};
 use limpid_core::analyse::{Breakdown, Entry};
 use limpid_core::config::Exclusions;
 use limpid_core::execute::Outcome;
+use limpid_core::history::Recorded;
 use limpid_core::plan::Disposal;
 use limpid_core::size::human;
 use limpid_core::walk::Usage;
@@ -550,6 +551,12 @@ fn result<'a>(
 
     for problem in &outcome.problems {
         body = body.push(line(false, problem.to_string()));
+    }
+    if let Recorded::Failed(why) = &outcome.recorded {
+        body = body.push(line(
+            false,
+            format!("This was done, but could not be written to the history: {why}"),
+        ));
     }
 
     container(body)
