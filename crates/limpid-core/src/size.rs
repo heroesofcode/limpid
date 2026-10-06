@@ -11,7 +11,7 @@ use std::fs::Metadata;
 use std::os::unix::fs::MetadataExt;
 
 /// Size of something, measured both ways.
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Size {
     /// Sum of file lengths, as `ls -l` would report them.
     pub apparent: u64,

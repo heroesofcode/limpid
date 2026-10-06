@@ -15,6 +15,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config::Exclusions;
 use crate::guard::{Guard, Permission, Refusal};
+use crate::history::{self, History, Recorded};
 use crate::paths::Roots;
 use crate::plan::{Disposal, Item, Plan};
 use crate::size::Size;
@@ -87,6 +88,29 @@ pub struct Outcome {
     pub files: u64,
     /// What could not be done.
     pub problems: Vec<Problem>,
+    /// What came out of each path in the plan, or would. Only the paths
+    /// that anything came out of.
+    pub removed: Vec<Removed>,
+    /// Whether the run was written to the history.
+    pub recorded: Recorded,
+}
+
+/// What came out of one path in a plan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Removed {
+    /// The name of the item it belongs to, as shown when it was agreed to.
+    pub name: String,
+    /// The path in the plan: a directory that was emptied, or what went
+    /// whole.
+    pub path: PathBuf,
+    /// How it went.
+    pub disposal: Disposal,
+    /// What came out.
+    pub size: Size,
+    /// How many files that was.
+    pub files: u64,
+    /// What went to the trash from here, by the path it had before it went.
+    pub trashed: Vec<PathBuf>,
 }
 
 impl Outcome {
@@ -100,6 +124,43 @@ impl Outcome {
         self.reclaimed += other.reclaimed;
         self.files += other.files;
         self.problems.extend(other.problems);
+        self.removed.extend(other.removed);
+    }
+
+    /// Count what came out of one path, against the item it belongs to.
+    fn put_down(&mut self, item: &Item, path: &Path, tally: Tally) {
+        self.reclaimed += tally.reclaimed;
+        self.files += tally.files;
+        self.problems.extend(tally.problems);
+        if tally.files > 0 || !tally.reclaimed.is_zero() || !tally.trashed.is_empty() {
+            self.removed.push(Removed {
+                name: item.name.clone(),
+                path: path.to_owned(),
+                disposal: item.disposal,
+                size: tally.reclaimed,
+                files: tally.files,
+                trashed: tally.trashed,
+            });
+        }
+    }
+}
+
+/// What acting on one path came to, before it is put down against the item
+/// it belongs to.
+#[derive(Debug, Default)]
+struct Tally {
+    reclaimed: Size,
+    files: u64,
+    problems: Vec<Problem>,
+    trashed: Vec<PathBuf>,
+}
+
+impl Tally {
+    fn absorb(&mut self, other: Self) {
+        self.reclaimed += other.reclaimed;
+        self.files += other.files;
+        self.problems.extend(other.problems);
+        self.trashed.extend(other.trashed);
     }
 }
 
@@ -132,6 +193,9 @@ pub struct Executor {
     walk: WalkOptions,
     apply: bool,
     exclusions: Exclusions,
+    /// Where an applying executor writes down what it did. A dry run has
+    /// none: it does nothing worth writing down.
+    history: Option<History>,
 }
 
 impl Executor {
@@ -142,19 +206,23 @@ impl Executor {
             walk: WalkOptions::default(),
             apply: false,
             exclusions: Exclusions::default(),
+            history: None,
         }
     }
 
-    /// An executor that will.
+    /// An executor that will, and writes down everything it does in the
+    /// history for these roots.
     ///
     /// Spelled out at the call site on purpose; there is no boolean to get
-    /// the wrong way round.
+    /// the wrong way round. And the history comes with it rather than being
+    /// asked for, so there is no way to remove things without a record.
     pub fn applying(roots: &Roots) -> Self {
         Self {
             guard: Guard::new(roots),
             walk: WalkOptions::default(),
             apply: true,
             exclusions: Exclusions::default(),
+            history: Some(History::at(roots)),
         }
     }
 
@@ -178,6 +246,18 @@ impl Executor {
 
     /// Carry out a plan.
     pub fn run(&self, plan: &Plan) -> Outcome {
+        let at = history::now();
+        // Taken before anything moves, so that what arrives in the trash
+        // during this run can be told from what was already there.
+        let trashing = plan
+            .items
+            .iter()
+            .any(|item| item.disposal == Disposal::Trash);
+        let before = match &self.history {
+            Some(_) if trashing => history::in_the_trash(),
+            _ => None,
+        };
+
         let mut outcome = Outcome {
             applied: self.apply,
             ..Outcome::default()
@@ -185,6 +265,13 @@ impl Executor {
 
         for item in &plan.items {
             outcome.absorb(self.run_item(item));
+        }
+
+        if let Some(history) = &self.history
+            && !outcome.removed.is_empty()
+        {
+            outcome.recorded =
+                history.record(at, &outcome.removed, &outcome.problems, before.as_ref());
         }
 
         outcome
@@ -228,8 +315,8 @@ impl Executor {
                 continue;
             }
 
-            match Reach::of(item.permission) {
-                Reach::Contents => outcome.absorb(self.empty(path, item.disposal)),
+            let tally = match Reach::of(item.permission) {
+                Reach::Contents => self.empty(path, item.disposal),
                 Reach::Whole => {
                     let is_folder =
                         std::fs::symlink_metadata(path).is_ok_and(|metadata| metadata.is_dir());
@@ -239,17 +326,18 @@ impl Executor {
                             .push(Problem::FolderNotDeleted(path.clone()));
                         continue;
                     }
-                    outcome.absorb(self.clear(path, item.disposal));
+                    self.clear(path, item.disposal)
                 }
-            }
+            };
+            outcome.put_down(item, path, tally);
         }
 
         outcome
     }
 
     /// Remove everything inside `directory`, leaving the directory itself.
-    fn empty(&self, directory: &Path, disposal: Disposal) -> Outcome {
-        let mut outcome = Outcome::default();
+    fn empty(&self, directory: &Path, disposal: Disposal) -> Tally {
+        let mut outcome = Tally::default();
 
         let entries = match std::fs::read_dir(directory) {
             Ok(entries) => entries,
@@ -281,9 +369,9 @@ impl Executor {
     /// what is not excluded goes. An entry that is itself excluded is left
     /// without comment: the user asked to clean the directory around it and
     /// to keep this, and both are being honoured.
-    fn clear(&self, path: &Path, disposal: Disposal) -> Outcome {
+    fn clear(&self, path: &Path, disposal: Disposal) -> Tally {
         if self.exclusions.covers(path) {
-            return Outcome::default();
+            return Tally::default();
         }
 
         if !self.exclusions.inside(path) {
@@ -300,7 +388,7 @@ impl Executor {
             return self.remove(path, disposal);
         }
 
-        let mut outcome = Outcome::default();
+        let mut outcome = Tally::default();
         match std::fs::read_dir(path) {
             Ok(entries) => {
                 for entry in entries.flatten() {
@@ -322,8 +410,8 @@ impl Executor {
                   `run_item` once the guard has accepted the path or the \
                   directory it sits in"
     )]
-    fn remove(&self, path: &Path, disposal: Disposal) -> Outcome {
-        let mut outcome = Outcome::default();
+    fn remove(&self, path: &Path, disposal: Disposal) -> Tally {
+        let mut outcome = Tally::default();
 
         let Ok(metadata) = std::fs::symlink_metadata(path) else {
             return outcome;
@@ -362,6 +450,9 @@ impl Executor {
             Ok(()) => {
                 outcome.reclaimed = size;
                 outcome.files = files;
+                if disposal == Disposal::Trash {
+                    outcome.trashed.push(path.to_owned());
+                }
             }
             Err(reason) => {
                 outcome.problems.push(Problem::Failed {
@@ -378,6 +469,7 @@ impl Executor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::history::History;
     use crate::model::{Kind, Risk, Target};
 
     fn write(path: &Path, bytes: usize) {
@@ -442,6 +534,171 @@ mod tests {
 
         assert_eq!(predicted.reclaimed, actual.reclaimed);
         assert_eq!(predicted.files, actual.files);
+        assert_eq!(predicted.removed, actual.removed);
+    }
+
+    #[test]
+    fn every_applied_run_is_written_down_with_what_came_out_of_each_path() {
+        let (_fixture, roots, cache) = populated_cache();
+        let plan = plan_for("Thumbnails", &cache, Kind::Cache);
+
+        let outcome = Executor::applying(&roots).run(&plan);
+        let read = History::at(&roots).read().unwrap();
+
+        let [run] = read.runs.as_slice() else {
+            panic!("one run, not {:?}", read.runs);
+        };
+        assert_eq!(outcome.recorded, Recorded::Run(run.at));
+        let [entry] = run.entries.as_slice() else {
+            panic!("one entry, not {:?}", run.entries);
+        };
+        assert_eq!(entry.name, "Thumbnails");
+        assert_eq!(entry.path, cache);
+        assert_eq!(entry.disposal, Disposal::Delete);
+        assert_eq!(entry.size, outcome.reclaimed);
+        assert_eq!(entry.files, 3);
+        assert!(entry.trashed.is_empty());
+    }
+
+    #[test]
+    fn a_dry_run_writes_nothing_down() {
+        let (_fixture, roots, cache) = populated_cache();
+
+        let outcome = Executor::dry_run(&roots).run(&plan_for("t", &cache, Kind::Cache));
+
+        assert_eq!(outcome.recorded, Recorded::Nothing);
+        assert!(!History::at(&roots).path().exists());
+    }
+
+    #[test]
+    fn a_run_that_removed_nothing_is_not_written_down() {
+        let fixture = tempfile::tempdir().unwrap();
+        let roots = Roots::under(fixture.path());
+        write(&roots.home("Documents/thesis.txt"), 5000);
+
+        let outcome = Executor::applying(&roots).run(&plan_for(
+            "oops",
+            &roots.home("Documents"),
+            Kind::Cache,
+        ));
+
+        assert!(!outcome.is_clean());
+        assert_eq!(outcome.recorded, Recorded::Nothing);
+        assert!(History::at(&roots).read().unwrap().runs.is_empty());
+    }
+
+    #[test]
+    fn what_could_not_be_done_is_written_down_beside_what_was() {
+        let (_fixture, roots, cache) = populated_cache();
+        let plan = Plan::from_targets(&[
+            Target::new("outside", Kind::Cache, Risk::Safe).path(roots.home("Documents")),
+            Target::new("thumbnails", Kind::Cache, Risk::Safe).path(&cache),
+        ]);
+
+        let _ = Executor::applying(&roots).run(&plan);
+        let run = History::at(&roots).read().unwrap().runs.remove(0);
+
+        assert_eq!(run.entries.len(), 1);
+        assert_eq!(run.problems.len(), 1);
+        assert!(run.problems[0].contains("Documents"), "{:?}", run.problems);
+    }
+
+    #[test]
+    fn a_history_that_cannot_be_written_is_said_and_does_not_undo_the_run() {
+        let (_fixture, roots, cache) = populated_cache();
+        // Where the history's folder should be, a file.
+        write(&roots.state.join("limpid"), 1);
+
+        let outcome = Executor::applying(&roots).run(&plan_for("t", &cache, Kind::Cache));
+
+        assert!(matches!(outcome.recorded, Recorded::Failed(_)));
+        assert_eq!(outcome.files, 3);
+        assert!(!cache.join("a.png").exists());
+    }
+
+    /// Set to the fixture in the process [`trashing_for_real`] runs in.
+    const TRASH_FIXTURE: &str = "LIMPID_TEST_TRASH_FIXTURE";
+
+    #[test]
+    fn what_goes_to_the_trash_is_written_down_where_the_trash_put_it() {
+        // The trash crate finds the trash through `XDG_DATA_HOME` and
+        // nothing else, so a test that really trashes something has to run
+        // where that points at a fixture. Changing it here would change it
+        // for every test running alongside; a child process has its own.
+        let fixture = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "execute::tests::trashing_for_real",
+                "--include-ignored",
+                "--nocapture",
+            ])
+            .env(TRASH_FIXTURE, fixture.path())
+            .env("XDG_DATA_HOME", Roots::under(fixture.path()).data)
+            .output()
+            .unwrap();
+
+        let said = String::from_utf8_lossy(&output.stdout);
+        assert!(output.status.success(), "{said}");
+        assert!(said.contains("1 passed"), "{said}");
+    }
+
+    #[test]
+    #[ignore = "run by the test above, in a process whose trash is a fixture"]
+    fn trashing_for_real() {
+        let Some(fixture) = std::env::var_os(TRASH_FIXTURE) else {
+            return;
+        };
+        let roots = Roots::under(Path::new(&fixture));
+        // Whatever started this, it does not get the real trash.
+        assert_eq!(
+            std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
+            Some(roots.data.clone())
+        );
+        let trash = roots.data("Trash");
+        let film = roots.home("Videos/film.mkv");
+        let folder = roots.home("Downloads/old-project");
+        let trash_them = |paths: &[&Path]| {
+            let plan = Plan::from_chosen(
+                paths
+                    .iter()
+                    .map(|path| (path.to_path_buf(), Size::new(4096, 4096))),
+                Disposal::Trash,
+            );
+            Executor::applying(&roots).run(&plan)
+        };
+
+        // The same name twice, so the second has to be told from the first.
+        write(&film, 4096);
+        let first = trash_them(&[&film]);
+        write(&film, 8192);
+        write(&folder.join("notes.txt"), 100);
+        write(&folder.join("src/main.rs"), 100);
+        let second = trash_them(&[&film, &folder]);
+
+        assert!(first.is_clean(), "{:?}", first.problems);
+        assert!(second.is_clean(), "{:?}", second.problems);
+        let runs = History::at(&roots).read().unwrap().runs;
+        assert_eq!(runs.len(), 2);
+
+        let earlier = &runs[1].entries[0].trashed;
+        let later = &runs[0].entries[0].trashed;
+        assert_eq!(earlier.len(), 1);
+        assert_eq!(later.len(), 1);
+        assert_ne!(earlier[0].info, later[0].info);
+        for trashed in [&earlier[0], &later[0]] {
+            assert!(trashed.info.starts_with(trash.join("info")), "{trashed:?}");
+            assert!(trashed.info.exists());
+            assert_eq!(trashed.original, film);
+        }
+
+        // A folder went whole, and is recorded as the one thing it went as.
+        let went = &runs[0].entries[1];
+        assert_eq!(went.path, folder);
+        assert_eq!(went.disposal, Disposal::Trash);
+        assert_eq!(went.trashed.len(), 1);
+        assert_eq!(went.trashed[0].original, folder);
+        assert!(trash.join("files/old-project/src/main.rs").exists());
     }
 
     #[test]

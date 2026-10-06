@@ -73,7 +73,8 @@ There is no excuse for a test that reads `$HOME`.
 | `analyse` | The "where did it go" side: one-level breakdown and largest files. Knows nothing, finds everything. |
 | `plan` | `Plan`, `Disposal`, `Selection`. What the user agreed to. |
 | `guard` | The last check before anything is removed. See @.claude/safety.md. |
-| `execute` | Carrying out a plan. |
+| `execute` | Carrying out a plan. An applying executor writes every run to the history itself. |
+| `history` | What was removed, when, and where it went. One appended line per run in `$XDG_STATE_HOME/limpid/history.jsonl`, with the trash's own record of whatever went there. |
 | `privileged` | The boundary types and the `Runner`. **No path crosses this.** |
 
 ## The application

@@ -11,6 +11,7 @@ use crate::layout::{self, Metrics};
 use crate::style;
 use crate::typography as ty;
 
+pub mod history;
 pub mod overview;
 pub mod settings;
 pub mod sidebar;

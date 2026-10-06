@@ -41,6 +41,7 @@ pub mod catalog;
 pub mod config;
 pub mod execute;
 pub mod guard;
+pub mod history;
 pub mod model;
 pub mod paths;
 pub mod plan;

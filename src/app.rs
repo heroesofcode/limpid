@@ -1,7 +1,7 @@
 //! Application state and the top-level view.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use iced::widget::{Space, column, container, responsive, row, scrollable, text};
@@ -11,6 +11,7 @@ use limpid_core::analyse::{self, Survey};
 use limpid_core::catalog::{self, Context};
 use limpid_core::config::{Config, Exclusions, Store};
 use limpid_core::execute::{Executor, Outcome};
+use limpid_core::history::{self, History};
 use limpid_core::model::{Category, Kind, Scan, Target};
 use limpid_core::paths::Roots;
 use limpid_core::plan::{Disposal, Magnitude, Plan, Selection};
@@ -34,19 +35,22 @@ pub enum Page {
     Overview,
     /// Where the space went, whatever it is.
     Storage,
+    /// What Limpid removed, and where it went.
+    History,
     /// Where the palette comes from, and what Limpid is.
     Settings,
 }
 
 impl Page {
     /// Every page, in navigation order.
-    pub const ALL: [Self; 3] = [Self::Overview, Self::Storage, Self::Settings];
+    pub const ALL: [Self; 4] = [Self::Overview, Self::Storage, Self::History, Self::Settings];
 
     /// The label in the sidebar, which is also the page heading.
     pub fn title(self) -> &'static str {
         match self {
             Self::Overview => "Overview",
             Self::Storage => "Storage",
+            Self::History => "History",
             Self::Settings => "Settings",
         }
     }
@@ -56,6 +60,7 @@ impl Page {
         match self {
             Self::Overview => "What is taking up space, and what is safe to let go of",
             Self::Storage => "Where the space went, with no opinion about whether it should have",
+            Self::History => "What Limpid removed, how large it was, where it went, and when",
             Self::Settings => "What Limpid keeps, what it leaves alone, and how it looks",
         }
     }
@@ -364,6 +369,8 @@ pub struct State {
     config: Store,
     /// Why the last change to the config file did not stick.
     config_error: Option<String>,
+    /// The history, as last read. `None` until the page is first opened.
+    history: Option<Result<history::Read, String>>,
     /// What was just excluded from the overview.
     excluded: Option<Excluded>,
     /// The path being typed on the settings page.
@@ -432,6 +439,8 @@ pub enum Message {
     EmptyTrash,
     /// Emptying the trash finished, or was sent back to its confirmation.
     TrashEmptied(Box<Emptying>),
+    /// The history was read.
+    HistoryRead(Box<Result<history::Read, String>>),
     /// Nothing happened worth reacting to.
     Nothing,
     /// Show a file in the desktop's file manager.
@@ -481,11 +490,27 @@ impl State {
             config: Store::open(&roots),
             roots,
             config_error: None,
+            history: None,
             excluded: None,
             draft: String::new(),
             scans: 0,
         };
         (state, Task::done(Message::StartScan))
+    }
+
+    /// The home directory everything is shown relative to.
+    pub fn home(&self) -> &Path {
+        &self.roots.home
+    }
+
+    /// The history, as last read. `None` until it has been.
+    pub fn history(&self) -> Option<&Result<history::Read, String>> {
+        self.history.as_ref()
+    }
+
+    /// Where the history is kept.
+    pub fn history_path(&self) -> PathBuf {
+        History::at(&self.roots).path().to_owned()
     }
 
     /// The colours in force.
@@ -691,6 +716,23 @@ impl State {
                 if page == Page::Storage && self.storage.trail.is_empty() {
                     return Task::done(Message::Explore(self.roots.home.clone()));
                 }
+                // Every time, not once: anything removed since, by this
+                // window or the command line, belongs on it.
+                if page == Page::History {
+                    let history = History::at(&self.roots);
+                    return Task::perform(
+                        async move {
+                            tokio::task::spawn_blocking(move || read_history(&history))
+                                .await
+                                .unwrap_or_else(|error| Err(error.to_string()))
+                        },
+                        |read| Message::HistoryRead(Box::new(read)),
+                    );
+                }
+                Task::none()
+            }
+            Message::HistoryRead(read) => {
+                self.history = Some(*read);
                 Task::none()
             }
             Message::Explore(path) => {
@@ -1294,6 +1336,7 @@ impl State {
             let body = match self.page {
                 Page::Overview => view::overview::view(palette, metrics, self),
                 Page::Storage => view::storage::view(palette, metrics, self),
+                Page::History => view::history::view(palette, metrics, self),
                 Page::Settings => view::settings::view(palette, metrics, self),
             };
 
@@ -1485,6 +1528,16 @@ pub fn selectable(target: &Target) -> bool {
         && (target.is_actionable() || target.privileged.is_some())
 }
 
+/// The history, or a sentence saying why it could not be read.
+fn read_history(history: &History) -> Result<history::Read, String> {
+    history.read().map_err(|error| {
+        format!(
+            "The history in {} could not be read: {error}",
+            history.path().display()
+        )
+    })
+}
+
 /// What the person asked never to be offered or removed, read from the file
 /// as it is now.
 ///
@@ -1514,6 +1567,45 @@ mod tests {
             assert!(!page.title().is_empty());
             assert!(!page.subtitle().is_empty());
         }
+    }
+
+    #[test]
+    fn the_history_page_reads_the_history_of_the_roots_the_window_started_with() {
+        let (mut state, dir) = boot();
+        let roots = Roots::under(dir.path());
+        let cache = roots.cache("thumbnails");
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join("a.png"), [0; 100]).unwrap();
+        let plan = Plan::from_targets(&[Target::new(
+            "Thumbnails",
+            Kind::Cache,
+            limpid_core::model::Risk::Safe,
+        )
+        .path(&cache)]);
+        let _ = Executor::applying(&roots).run(&plan);
+
+        let read = read_history(&History::at(&state.roots));
+        let _ = state.update(Message::HistoryRead(Box::new(read)));
+
+        let Some(Ok(read)) = state.history() else {
+            panic!("read, not {:?}", state.history());
+        };
+        assert_eq!(read.runs.len(), 1);
+        assert_eq!(read.runs[0].entries[0].name, "Thumbnails");
+        assert!(state.history_path().starts_with(dir.path()));
+    }
+
+    #[test]
+    fn a_history_that_cannot_be_read_says_where_it_is() {
+        let dir = tempfile::tempdir().unwrap();
+        let roots = Roots::under(dir.path());
+        let history = History::at(&roots);
+        // A folder where the file should be.
+        std::fs::create_dir_all(history.path()).unwrap();
+
+        let why = read_history(&history).unwrap_err();
+
+        assert!(why.contains("history.jsonl"), "{why}");
     }
 
     #[test]
