@@ -48,6 +48,8 @@ pub mod plan;
 pub mod privileged;
 pub mod project;
 pub mod size;
+#[cfg(test)]
+mod testing;
 pub mod volume;
 pub mod walk;
 

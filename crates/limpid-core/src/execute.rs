@@ -616,45 +616,17 @@ mod tests {
         assert!(!cache.join("a.png").exists());
     }
 
-    /// Set to the fixture in the process [`trashing_for_real`] runs in.
-    const TRASH_FIXTURE: &str = "LIMPID_TEST_TRASH_FIXTURE";
-
     #[test]
     fn what_goes_to_the_trash_is_written_down_where_the_trash_put_it() {
-        // The trash crate finds the trash through `XDG_DATA_HOME` and
-        // nothing else, so a test that really trashes something has to run
-        // where that points at a fixture. Changing it here would change it
-        // for every test running alongside; a child process has its own.
-        let fixture = tempfile::tempdir().unwrap();
-        let output = std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "execute::tests::trashing_for_real",
-                "--include-ignored",
-                "--nocapture",
-            ])
-            .env(TRASH_FIXTURE, fixture.path())
-            .env("XDG_DATA_HOME", Roots::under(fixture.path()).data)
-            .output()
-            .unwrap();
-
-        let said = String::from_utf8_lossy(&output.stdout);
-        assert!(output.status.success(), "{said}");
-        assert!(said.contains("1 passed"), "{said}");
+        crate::testing::in_a_fixture_trash("execute::tests::trashing_for_real");
     }
 
     #[test]
     #[ignore = "run by the test above, in a process whose trash is a fixture"]
     fn trashing_for_real() {
-        let Some(fixture) = std::env::var_os(TRASH_FIXTURE) else {
+        let Some(roots) = crate::testing::fixture_trash() else {
             return;
         };
-        let roots = Roots::under(Path::new(&fixture));
-        // Whatever started this, it does not get the real trash.
-        assert_eq!(
-            std::env::var_os("XDG_DATA_HOME").map(PathBuf::from),
-            Some(roots.data.clone())
-        );
         let trash = roots.data("Trash");
         let film = roots.home("Videos/film.mkv");
         let folder = roots.home("Downloads/old-project");

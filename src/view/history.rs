@@ -3,15 +3,15 @@
 use std::path::Path;
 
 use iced::widget::text::Wrapping;
-use iced::widget::{Column, column, container, row, text};
+use iced::widget::{Column, button, column, container, row, text};
 use iced::{Alignment, Element, Length};
 
 use limpid_core::config::contract;
-use limpid_core::history::{Entry, Read, Run};
+use limpid_core::history::{Entry, Read, Run, Whereabouts};
 use limpid_core::size::human;
 use limpid_theme::Palette;
 
-use crate::app::{Message, State};
+use crate::app::{Message, Recall, State};
 use crate::layout::Metrics;
 use crate::style;
 use crate::typography as ty;
@@ -30,7 +30,7 @@ pub fn view<'a>(palette: Palette, metrics: Metrics, state: &'a State) -> Element
     let home = state.home();
     let page = column![].spacing(metrics.gap).width(Length::Fill);
 
-    let read = match state.history() {
+    let recall = match state.history() {
         None => {
             return page
                 .push(
@@ -41,17 +41,27 @@ pub fn view<'a>(palette: Palette, metrics: Metrics, state: &'a State) -> Element
                 .into();
         }
         Some(Err(why)) => return page.push(view::failed(palette, metrics, why)).into(),
-        Some(Ok(read)) => read,
+        Some(Ok(recall)) => recall,
     };
 
     let mut page = page;
-    if read.runs.is_empty() {
+    if let Some(result) = state.restoration() {
+        page = page.push(view::restoration(palette, metrics, result, home));
+    }
+    if recall.read.runs.is_empty() {
         page = page.push(nothing_yet(palette, metrics));
     }
-    for run in read.runs.iter().take(RUNS_SHOWN) {
-        page = page.push(card(palette, metrics, run, home));
+    for run in recall.read.runs.iter().take(RUNS_SHOWN) {
+        page = page.push(card(
+            palette,
+            metrics,
+            recall,
+            run,
+            home,
+            state.is_restoring(),
+        ));
     }
-    page.push(footer(palette, read, &state.history_path(), home))
+    page.push(footer(palette, &recall.read, &state.history_path(), home))
         .into()
 }
 
@@ -80,8 +90,16 @@ fn nothing_yet<'a>(palette: Palette, metrics: Metrics) -> Element<'a, Message> {
     .into()
 }
 
-/// One run: when, how much and which way, then what.
-fn card<'a>(palette: Palette, metrics: Metrics, run: &'a Run, home: &Path) -> Element<'a, Message> {
+/// One run: when, how much and which way, then what, and the way back for
+/// whatever of it is still in the trash.
+fn card<'a>(
+    palette: Palette,
+    metrics: Metrics,
+    recall: &'a Recall,
+    run: &'a Run,
+    home: &Path,
+    restoring: bool,
+) -> Element<'a, Message> {
     let mut body = column![
         text(run.when())
             .size(ty::SUBTITLE)
@@ -98,8 +116,14 @@ fn card<'a>(palette: Palette, metrics: Metrics, run: &'a Run, home: &Path) -> El
     // Which way each one went is only worth saying when they did not all
     // go the same way; otherwise the summary has said it.
     let mixed = run.disposal().is_none();
+    let whereabouts = |entry: &'a Entry| {
+        recall
+            .inside
+            .as_ref()
+            .and_then(|inside| recall.read.whereabouts(run, entry, inside))
+    };
     for entry in run.entries.iter().take(ENTRIES_SHOWN) {
-        list = list.push(entry_row(palette, entry, home, mixed));
+        list = list.push(entry_row(palette, entry, whereabouts(entry), home, mixed));
     }
     if run.entries.len() > ENTRIES_SHOWN {
         list = list.push(
@@ -115,12 +139,31 @@ fn card<'a>(palette: Palette, metrics: Metrics, run: &'a Run, home: &Path) -> El
             format!("{}: {}", done.operation.describe(), done.detail),
         ));
     }
+    for restored in &run.restored {
+        list = list.push(line(palette, true, contract(&restored.path, home)));
+    }
     for problem in &run.problems {
         list = list.push(line(palette, false, problem.clone()));
     }
 
     body = body.push(iced::widget::Space::new().height(Length::Fixed(ty::GAP_TIGHT)));
     body = body.push(list);
+
+    // Asked of every entry, not only those listed: the way back is for the
+    // whole run, including what "and 3 more" stands for.
+    let in_the_trash = run
+        .entries
+        .iter()
+        .any(|entry| whereabouts(entry) == Some(Whereabouts::InTheTrash));
+    if in_the_trash {
+        body = body.push(iced::widget::Space::new().height(Length::Fixed(ty::GAP_TIGHT)));
+        body = body.push(
+            button(text("Put back").size(ty::BODY_SMALL))
+                .style(style::quiet_button(palette))
+                .padding([6, 14])
+                .on_press_maybe((!restoring).then_some(Message::Restore(run.at))),
+        );
+    }
 
     container(body)
         .style(style::card(palette))
@@ -133,6 +176,7 @@ fn card<'a>(palette: Palette, metrics: Metrics, run: &'a Run, home: &Path) -> El
 fn entry_row<'a>(
     palette: Palette,
     entry: &'a Entry,
+    whereabouts: Option<Whereabouts<'_>>,
     home: &Path,
     mixed: bool,
 ) -> Element<'a, Message> {
@@ -167,6 +211,10 @@ fn entry_row<'a>(
     if mixed {
         under.push_str(" \u{b7} ");
         under.push_str(entry.disposal.describe());
+    }
+    if let Some(whereabouts) = whereabouts {
+        under.push_str(" \u{b7} ");
+        under.push_str(&whereabouts.describe());
     }
 
     said.push(

@@ -3,6 +3,8 @@
 use iced::widget::{Row, Space, button, checkbox, column, container, row, text};
 use iced::{Alignment, Element, Length};
 
+use limpid_core::config::contract;
+use limpid_core::history::{Recorded, Restoration};
 use limpid_core::plan::Magnitude;
 use limpid_theme::{Color, Palette};
 
@@ -256,4 +258,72 @@ pub fn failed<'a>(palette: Palette, metrics: Metrics, why: &str) -> Element<'a, 
     .padding(metrics.gap)
     .width(Length::Fill)
     .into()
+}
+
+/// What putting things back from the trash did, said where it was asked for.
+pub fn restoration<'a>(
+    palette: Palette,
+    metrics: Metrics,
+    result: &Result<Restoration, String>,
+    home: &std::path::Path,
+) -> Element<'a, Message> {
+    let line = |good: bool, said: String| -> Element<'a, Message> {
+        row![
+            text(if good { "\u{2713}" } else { "\u{2717}" })
+                .size(ty::BODY_SMALL)
+                .style(style::tinted(if good {
+                    palette.green
+                } else {
+                    palette.red
+                })),
+            text(said)
+                .size(ty::BODY_SMALL)
+                .style(style::body(palette))
+                .wrapping(text::Wrapping::WordOrGlyph)
+                .width(Length::Fill),
+        ]
+        .spacing(ty::GAP_TIGHT)
+        .width(Length::Fill)
+        .into()
+    };
+
+    let mut body = column![].spacing(6).width(Length::Fill);
+    match result {
+        Err(why) => body = body.push(line(false, why.clone())),
+        Ok(restoration) => {
+            match restoration.restored.as_slice() {
+                [] if restoration.problems.is_empty() => {
+                    body = body.push(line(
+                        true,
+                        "Nothing from that run is still in the trash.".to_owned(),
+                    ));
+                }
+                [] => {}
+                [only] => {
+                    body = body.push(line(true, format!("Put back {}.", contract(only, home))));
+                }
+                several => {
+                    body = body.push(line(
+                        true,
+                        format!("Put back {} items where they were.", several.len()),
+                    ));
+                }
+            }
+            for problem in &restoration.problems {
+                body = body.push(line(false, problem.to_string()));
+            }
+            if let Recorded::Failed(why) = &restoration.recorded {
+                body = body.push(line(
+                    false,
+                    format!("This was done, but could not be written to the history: {why}"),
+                ));
+            }
+        }
+    }
+
+    container(body)
+        .style(style::well(palette))
+        .padding(metrics.gap)
+        .width(Length::Fill)
+        .into()
 }

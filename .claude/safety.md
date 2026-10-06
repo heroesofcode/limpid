@@ -242,21 +242,37 @@ this. A disk that could not be measured counts as large, not as fine.
 
 `disallowed-methods` in `clippy.toml`. Outside the sites allowed to, a call
 to `std::fs::remove_file`, `remove_dir`, `remove_dir_all`, `trash::delete`,
-`canonicalize` or `std::process::Command::new` fails the build, with the
-reason in the error message. Rules 2 and 3 were true because someone
+the trash's `purge_all` and `restore_all`, `canonicalize` or
+`std::process::Command::new` fails the build, with the reason in the error
+message. Rules 2 and 3 were true because someone
 remembered them; this makes the compiler remember.
 
 The allowed sites are few, and each says why with
 `#[expect(clippy::disallowed_methods, reason = "...")]`: the executor's one
 point of removal, the config file's staging file, the helper's coredump
 removal and its fixed subprocesses, the privilege boundary's `pkexec`, the
-fontconfig query and the file manager fallback. `expect` rather than `allow`,
+history's one point of putting things back from the trash, the fontconfig
+query and the file manager fallback. `expect` rather than `allow`,
 so a site that stops needing the exception says so.
 
 Adding a site means writing a reason that would convince a reviewer the call
 cannot reach a path the guard has not seen, or run something the helper was
 not written to run. If the reason will not come, neither should the call.
 Test code is exempt; the library is still checked in its ordinary build.
+
+## 15. Putting back never puts anything over something
+
+`History::restore` in `crates/limpid-core/src/history.rs`. Something comes
+back from the trash only if the trash still holds exactly what the history
+wrote down when it went there — the same `.trashinfo`, the same origin and
+the same arrival time. A file that arrived later under the same name is a
+different file, and is not touched.
+
+It comes back only where nothing is now. The trash crate creates the
+destination exclusively and reports a collision rather than replacing what
+is there, and a collision leaves the item in the trash and says so. Undo
+that can overwrite is a second way to lose a file, reached from the button
+meant to prevent losing one.
 
 ## Checklist for adding a scanner
 

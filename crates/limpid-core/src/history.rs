@@ -19,7 +19,7 @@
 //! enough to find it again. Each thing that went is recorded with the
 //! trash's own record of it.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::ffi::OsString;
 use std::io::{Read as _, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
@@ -60,6 +60,9 @@ pub struct Run {
     /// What could not be done, as it was reported at the time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub problems: Vec<String>,
+    /// What this run put back from the trash, when that is what it did.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restored: Vec<Restored>,
 }
 
 impl Run {
@@ -89,6 +92,12 @@ impl Run {
     /// How much, in how many files, and which way it went: the line a run
     /// is listed under.
     pub fn summary(&self) -> String {
+        if !self.restored.is_empty() {
+            return match self.restored.len() {
+                1 => "1 item put back from the trash".to_owned(),
+                items => format!("{items} items put back from the trash"),
+            };
+        }
         if self.entries.is_empty() {
             return "by the privileged helper".to_owned();
         }
@@ -140,7 +149,7 @@ pub struct Entry {
 }
 
 /// Something in the trash, as the trash recorded it.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub struct Trashed {
     /// The `.trashinfo` file the trash keeps for it.
     #[serde(with = "exact")]
@@ -150,6 +159,77 @@ pub struct Trashed {
     pub original: PathBuf,
     /// When the trash says it arrived, in seconds since the Unix epoch.
     pub deleted: i64,
+}
+
+/// Something put back from the trash.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Restored {
+    /// The run that sent it there.
+    pub from: u64,
+    /// Where it is again.
+    #[serde(with = "exact")]
+    pub path: PathBuf,
+}
+
+/// Something that was not put back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotRestored {
+    /// It is no longer in the trash: put back already, from here or from
+    /// the file manager, or the trash was emptied since.
+    Gone(PathBuf),
+    /// Something is where it was now. It stays in the trash rather than
+    /// being put over that.
+    Occupied(PathBuf),
+    /// The trash or the filesystem would not.
+    Failed {
+        /// Where it was to go.
+        path: PathBuf,
+        /// What was said.
+        reason: String,
+    },
+}
+
+impl std::fmt::Display for NotRestored {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Gone(path) => write!(
+                formatter,
+                "{} is no longer in the trash, so there is nothing to put back",
+                path.display()
+            ),
+            Self::Occupied(path) => write!(
+                formatter,
+                "something else is at {} now, so it was left in the trash rather than put over it",
+                path.display()
+            ),
+            Self::Failed { path, reason } => write!(formatter, "{}: {reason}", path.display()),
+        }
+    }
+}
+
+/// What putting a run back did.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Restoration {
+    /// Back where each was.
+    pub restored: Vec<PathBuf>,
+    /// What stayed where it was, and why.
+    pub problems: Vec<NotRestored>,
+    /// Whether putting them back was itself written down.
+    pub recorded: Recorded,
+}
+
+/// Why nothing could be put back.
+#[derive(Debug, thiserror::Error)]
+pub enum RestoreError {
+    /// The history could not be read, so there is nothing to go on.
+    #[error("the history could not be read: {0}")]
+    Unreadable(#[from] std::io::Error),
+    /// No run in the history has that time.
+    #[error("that run is not in the history")]
+    Unknown,
+    /// The trash could not be listed.
+    #[error("the trash could not be read: {0}")]
+    Trash(String),
 }
 
 /// Whether a run made it into the history.
@@ -173,6 +253,79 @@ pub struct Read {
     /// Lines that could not be understood: damaged, or written by a newer
     /// Limpid. Left in the file as they are, and not shown.
     pub skipped: usize,
+}
+
+/// Where something a run sent to the trash is now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Whereabouts<'a> {
+    /// Still in the trash, and can be put back.
+    InTheTrash,
+    /// Put back, by this run.
+    PutBack(&'a Run),
+    /// Not in the trash any more, and not put back by Limpid: restored from
+    /// the file manager, or the trash was emptied.
+    Gone,
+}
+
+impl Whereabouts<'_> {
+    /// A few words for it.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::InTheTrash => "in the trash".to_owned(),
+            Self::PutBack(run) => format!("put back {}", run.when()),
+            Self::Gone => "no longer in the trash".to_owned(),
+        }
+    }
+}
+
+impl Read {
+    /// Where what `entry` of the run `from` sent to the trash is now, given
+    /// what [`still_in_the_trash`] found. `None` when it sent nothing there
+    /// that Limpid could find afterwards.
+    pub fn whereabouts(
+        &self,
+        from: &Run,
+        entry: &Entry,
+        inside: &HashSet<PathBuf>,
+    ) -> Option<Whereabouts<'_>> {
+        if entry.trashed.is_empty() {
+            return None;
+        }
+        if entry
+            .trashed
+            .iter()
+            .any(|trashed| inside.contains(&trashed.info))
+        {
+            return Some(Whereabouts::InTheTrash);
+        }
+        Some(
+            entry
+                .trashed
+                .iter()
+                .find_map(|trashed| self.put_back(from.at, &trashed.original))
+                .map_or(Whereabouts::Gone, Whereabouts::PutBack),
+        )
+    }
+
+    /// The newest run with anything still in the trash.
+    pub fn latest_in_the_trash(&self, inside: &HashSet<PathBuf>) -> Option<&Run> {
+        self.runs.iter().find(|run| {
+            run.entries
+                .iter()
+                .flat_map(|entry| &entry.trashed)
+                .any(|trashed| inside.contains(&trashed.info))
+        })
+    }
+
+    /// The run that put `path` back, after the run at `from` had sent it to
+    /// the trash. The newest, if it went and came back more than once.
+    pub fn put_back(&self, from: u64, path: &Path) -> Option<&Run> {
+        self.runs.iter().find(|run| {
+            run.restored
+                .iter()
+                .any(|restored| restored.from == from && restored.path == path)
+        })
+    }
 }
 
 /// The history file.
@@ -250,6 +403,77 @@ impl History {
         file.sync_data()
     }
 
+    /// Put back everything the run at `at` sent to the trash that is still
+    /// there.
+    ///
+    /// Each thing is found by the trash's own record of it as it was
+    /// written down — the `.trashinfo`, where it came from, and when it
+    /// arrived — and nothing else: a different file that arrived later
+    /// under the same name is not it. Nothing is ever put over something
+    /// that is there now. What Limpid has already put back is passed over
+    /// without comment, so asking twice reports only what is new. Putting
+    /// things back is a run of its own, and is written down like one.
+    pub fn restore(&self, at: u64) -> Result<Restoration, RestoreError> {
+        let read = self.read()?;
+        let run = read
+            .runs
+            .iter()
+            .find(|run| run.at == at)
+            .ok_or(RestoreError::Unknown)?;
+        let wanted: Vec<&Trashed> = run
+            .entries
+            .iter()
+            .flat_map(|entry| &entry.trashed)
+            .filter(|trashed| read.put_back(at, &trashed.original).is_none())
+            .collect();
+        if wanted.is_empty() {
+            return Ok(Restoration::default());
+        }
+
+        let inside =
+            trash::os_limited::list().map_err(|error| RestoreError::Trash(error.to_string()))?;
+        let started = now();
+        let (restored, problems) = put_back(&wanted, inside, restore_one);
+
+        let recorded = if restored.is_empty() {
+            Recorded::Nothing
+        } else {
+            let run = Run {
+                version: VERSION,
+                at: started,
+                entries: Vec::new(),
+                operations: Vec::new(),
+                // Not what had already gone: the run that sent it says so
+                // where it is listed, and saying it here too is noise.
+                problems: problems
+                    .iter()
+                    .filter(|problem| !matches!(problem, NotRestored::Gone(_)))
+                    .map(ToString::to_string)
+                    .collect(),
+                restored: restored
+                    .iter()
+                    .map(|path| Restored {
+                        from: at,
+                        path: path.clone(),
+                    })
+                    .collect(),
+            };
+            match self.append(&run) {
+                Ok(()) => Recorded::Run(started),
+                Err(error) => Recorded::Failed(format!(
+                    "could not write to {}: {error}",
+                    self.path.display()
+                )),
+            }
+        };
+
+        Ok(Restoration {
+            restored,
+            problems,
+            recorded,
+        })
+    }
+
     /// Write down what an executor removed.
     pub(crate) fn record(
         &self,
@@ -290,6 +514,7 @@ impl History {
             entries,
             operations: Vec::new(),
             problems: problems.iter().map(ToString::to_string).collect(),
+            restored: Vec::new(),
         };
         match self.append(&run) {
             Ok(()) => Recorded::Run(at),
@@ -311,6 +536,7 @@ impl History {
             entries: Vec::new(),
             operations: report.completed.clone(),
             problems: Vec::new(),
+            restored: Vec::new(),
         };
         match self.append(&run) {
             Ok(()) => Recorded::Run(at),
@@ -340,6 +566,92 @@ fn unterminated(file: &mut std::fs::File) -> std::io::Result<bool> {
     let mut last = [0];
     file.read_exact(&mut last)?;
     Ok(last[0] != b'\n')
+}
+
+/// Which of the things the history sent to the trash are still there, by
+/// their `.trashinfo`. `None` when the trash cannot be listed, which is
+/// different from nothing being there.
+pub fn still_in_the_trash(read: &Read) -> Option<HashSet<PathBuf>> {
+    let sent_any = read
+        .runs
+        .iter()
+        .flat_map(|run| &run.entries)
+        .any(|entry| !entry.trashed.is_empty());
+    if !sent_any {
+        return Some(HashSet::new());
+    }
+    let inside = trash::os_limited::list().ok()?;
+    Some(present(read, &inside))
+}
+
+/// The `.trashinfo` of everything in `read` that `inside` still holds.
+fn present(read: &Read, inside: &[trash::TrashItem]) -> HashSet<PathBuf> {
+    let by_info: HashMap<&std::ffi::OsStr, &trash::TrashItem> = inside
+        .iter()
+        .map(|item| (item.id.as_os_str(), item))
+        .collect();
+    read.runs
+        .iter()
+        .flat_map(|run| &run.entries)
+        .flat_map(|entry| &entry.trashed)
+        .filter(|trashed| {
+            by_info
+                .get(trashed.info.as_os_str())
+                .is_some_and(|item| is(item, trashed))
+        })
+        .map(|trashed| trashed.info.clone())
+        .collect()
+}
+
+/// Whether an item in the trash is the one that was written down.
+fn is(item: &trash::TrashItem, trashed: &Trashed) -> bool {
+    Path::new(&item.id) == trashed.info
+        && item.original_path() == trashed.original
+        && item.time_deleted == trashed.deleted
+}
+
+/// Put back each of `wanted` that `inside` still holds, with `restore`.
+///
+/// One at a time, so one that cannot go back does not stop the rest.
+fn put_back(
+    wanted: &[&Trashed],
+    mut inside: Vec<trash::TrashItem>,
+    mut restore: impl FnMut(trash::TrashItem) -> Result<(), trash::Error>,
+) -> (Vec<PathBuf>, Vec<NotRestored>) {
+    let mut restored = Vec::new();
+    let mut problems = Vec::new();
+
+    for trashed in wanted {
+        let Some(index) = inside.iter().position(|item| is(item, trashed)) else {
+            problems.push(NotRestored::Gone(trashed.original.clone()));
+            continue;
+        };
+        match restore(inside.swap_remove(index)) {
+            Ok(()) => restored.push(trashed.original.clone()),
+            Err(trash::Error::RestoreCollision { path, .. }) => {
+                problems.push(NotRestored::Occupied(path));
+            }
+            Err(error) => problems.push(NotRestored::Failed {
+                path: trashed.original.clone(),
+                reason: error.to_string(),
+            }),
+        }
+    }
+
+    (restored, problems)
+}
+
+/// Put one thing back where the trash says it came from.
+#[expect(
+    clippy::disallowed_methods,
+    reason = "the one place anything comes back from the trash: one item, \
+              matched against the history by its .trashinfo, origin and \
+              arrival, and never over something that exists — the trash \
+              crate creates the destination exclusively and reports a \
+              collision instead of replacing it"
+)]
+fn restore_one(item: trash::TrashItem) -> Result<(), trash::Error> {
+    trash::os_limited::restore_all([item])
 }
 
 /// Everything in the trash now, by the trash's own name for it. `None` when
@@ -464,6 +776,7 @@ mod tests {
             }],
             operations: Vec::new(),
             problems: Vec::new(),
+            restored: Vec::new(),
         }
     }
 
@@ -731,5 +1044,257 @@ mod tests {
 
         assert_eq!(history.record_operations(1, &failed), Recorded::Nothing);
         assert!(history.read().unwrap().runs.is_empty());
+    }
+
+    fn trashed(info: &str, original: &str, deleted: i64) -> Trashed {
+        Trashed {
+            info: PathBuf::from(info),
+            original: PathBuf::from(original),
+            deleted,
+        }
+    }
+
+    #[test]
+    fn only_what_was_written_down_is_put_back() {
+        // Same name and place, arrived later: the trash was emptied and the
+        // name reused. It is not the thing that was sent.
+        let wanted = trashed("/t/info/film.mkv.trashinfo", "/home/x/film.mkv", 100);
+        let inside = vec![item("/t/info/film.mkv.trashinfo", "/home/x/film.mkv", 300)];
+        let mut asked = Vec::new();
+
+        let (restored, problems) = put_back(&[&wanted], inside, |item| {
+            asked.push(item.id);
+            Ok(())
+        });
+
+        assert!(restored.is_empty());
+        assert!(asked.is_empty());
+        assert_eq!(
+            problems,
+            vec![NotRestored::Gone(PathBuf::from("/home/x/film.mkv"))]
+        );
+    }
+
+    #[test]
+    fn something_where_it_was_keeps_it_in_the_trash() {
+        let wanted = trashed("/t/info/notes.txt.trashinfo", "/home/x/notes.txt", 1);
+        let inside = vec![item("/t/info/notes.txt.trashinfo", "/home/x/notes.txt", 1)];
+
+        let (restored, problems) = put_back(&[&wanted], inside, |item| {
+            Err(trash::Error::RestoreCollision {
+                path: item.original_path(),
+                remaining_items: vec![item],
+            })
+        });
+
+        assert!(restored.is_empty());
+        assert_eq!(
+            problems,
+            vec![NotRestored::Occupied(PathBuf::from("/home/x/notes.txt"))]
+        );
+    }
+
+    #[test]
+    fn one_that_cannot_go_back_does_not_stop_the_rest() {
+        let first = trashed("/t/info/a.trashinfo", "/home/x/a", 1);
+        let second = trashed("/t/info/b.trashinfo", "/home/x/b", 1);
+        let inside = vec![
+            item("/t/info/a.trashinfo", "/home/x/a", 1),
+            item("/t/info/b.trashinfo", "/home/x/b", 1),
+        ];
+
+        let (restored, problems) = put_back(&[&first, &second], inside, |item| {
+            if item.name == "a" {
+                Err(trash::Error::Unknown {
+                    description: "no".to_owned(),
+                })
+            } else {
+                Ok(())
+            }
+        });
+
+        assert_eq!(restored, vec![PathBuf::from("/home/x/b")]);
+        assert!(
+            matches!(&problems[..], [NotRestored::Failed { path, .. }] if path == Path::new("/home/x/a"))
+        );
+    }
+
+    #[test]
+    fn what_is_still_in_the_trash_is_what_was_written_down() {
+        let mut sent = run(1, "film.mkv");
+        sent.entries[0].trashed = vec![
+            trashed("/t/info/film.mkv.trashinfo", "/home/x/film.mkv", 100),
+            trashed("/t/info/old.trashinfo", "/home/x/old", 100),
+        ];
+        let read = Read {
+            runs: vec![sent],
+            skipped: 0,
+        };
+        let inside = vec![
+            item("/t/info/film.mkv.trashinfo", "/home/x/film.mkv", 100),
+            // The same name reused by something that arrived later.
+            item("/t/info/old.trashinfo", "/home/x/old", 999),
+        ];
+
+        assert_eq!(
+            present(&read, &inside),
+            HashSet::from([PathBuf::from("/t/info/film.mkv.trashinfo")])
+        );
+    }
+
+    #[test]
+    fn a_run_that_put_things_back_is_found_by_what_it_put_back() {
+        let back = Run {
+            restored: vec![Restored {
+                from: 1,
+                path: PathBuf::from("/home/x/film.mkv"),
+            }],
+            entries: Vec::new(),
+            ..run(2, "x")
+        };
+        let read = Read {
+            runs: vec![back.clone(), run(1, "film.mkv")],
+            skipped: 0,
+        };
+
+        assert_eq!(read.put_back(1, Path::new("/home/x/film.mkv")), Some(&back));
+        assert_eq!(read.put_back(1, Path::new("/home/x/other")), None);
+        assert_eq!(back.summary(), "1 item put back from the trash");
+    }
+
+    #[test]
+    fn something_sent_to_the_trash_is_there_put_back_or_gone() {
+        let mut sent = run(1, "film.mkv");
+        sent.entries[0].trashed =
+            vec![trashed("/t/info/film.mkv.trashinfo", "/home/x/film.mkv", 1)];
+        let back = Run {
+            restored: vec![Restored {
+                from: 1,
+                path: PathBuf::from("/home/x/film.mkv"),
+            }],
+            entries: Vec::new(),
+            ..run(2, "x")
+        };
+        let entry = sent.entries[0].clone();
+        let inside = HashSet::from([PathBuf::from("/t/info/film.mkv.trashinfo")]);
+        let empty = HashSet::new();
+
+        let before = Read {
+            runs: vec![sent.clone()],
+            skipped: 0,
+        };
+        let after = Read {
+            runs: vec![back.clone(), sent.clone()],
+            skipped: 0,
+        };
+
+        assert_eq!(
+            before.whereabouts(&sent, &entry, &inside),
+            Some(Whereabouts::InTheTrash)
+        );
+        assert_eq!(before.latest_in_the_trash(&inside), Some(&sent));
+        assert_eq!(
+            before.whereabouts(&sent, &entry, &empty),
+            Some(Whereabouts::Gone)
+        );
+        assert_eq!(
+            after.whereabouts(&sent, &entry, &empty),
+            Some(Whereabouts::PutBack(&back))
+        );
+        assert_eq!(after.latest_in_the_trash(&empty), None);
+        // Deleted outright: nothing to say about where it is.
+        assert_eq!(
+            before.whereabouts(&sent, &run(3, "y").entries[0], &inside),
+            None
+        );
+    }
+
+    #[test]
+    fn putting_back_a_run_that_is_not_there_says_so() {
+        let (_fixture, history) = history();
+        history.append(&run(1, "a")).unwrap();
+
+        assert!(matches!(history.restore(2), Err(RestoreError::Unknown)));
+    }
+
+    #[test]
+    fn a_run_that_sent_nothing_to_the_trash_has_nothing_to_put_back() {
+        let (_fixture, history) = history();
+        history.append(&run(1, "a")).unwrap();
+
+        assert_eq!(history.restore(1).unwrap(), Restoration::default());
+    }
+
+    #[test]
+    fn what_went_to_the_trash_comes_back_where_it_was() {
+        crate::testing::in_a_fixture_trash("history::tests::restoring_for_real");
+    }
+
+    #[test]
+    #[ignore = "run by the test above, in a process whose trash is a fixture"]
+    fn restoring_for_real() {
+        use crate::execute::Executor;
+        use crate::plan::Plan;
+        use crate::testing::write;
+
+        let Some(roots) = crate::testing::fixture_trash() else {
+            return;
+        };
+        let film = roots.home("Videos/film.mkv");
+        let folder = roots.home("Downloads/old-project");
+        let notes = roots.home("Documents/notes.txt");
+        write(&film, 4096);
+        write(&folder.join("src/main.rs"), 100);
+        write(&notes, 10);
+
+        let plan = Plan::from_chosen(
+            [&film, &folder, &notes].map(|path| (path.clone(), Size::new(1, 1))),
+            Disposal::Trash,
+        );
+        let outcome = Executor::applying(&roots).run(&plan);
+        let Recorded::Run(at) = outcome.recorded else {
+            panic!("not recorded: {outcome:?}");
+        };
+        // Something new where one of them was.
+        write(&notes, 20);
+
+        let history = History::at(&roots);
+        let still = still_in_the_trash(&history.read().unwrap()).unwrap();
+        assert_eq!(still.len(), 3);
+
+        let restoration = history.restore(at).unwrap();
+
+        assert_eq!(restoration.restored, vec![film.clone(), folder.clone()]);
+        assert_eq!(
+            restoration.problems,
+            vec![NotRestored::Occupied(notes.clone())]
+        );
+        assert_eq!(std::fs::metadata(&film).unwrap().len(), 4096);
+        assert!(folder.join("src/main.rs").exists());
+        assert_eq!(std::fs::metadata(&notes).unwrap().len(), 20, "not put over");
+
+        // Written down as a run of its own, with what stayed and why.
+        let read = history.read().unwrap();
+        assert_eq!(restoration.recorded, Recorded::Run(read.runs[0].at));
+        assert_eq!(read.runs[0].restored.len(), 2);
+        assert_eq!(read.runs[0].problems.len(), 1);
+        assert!(read.put_back(at, &film).is_some());
+        assert!(read.put_back(at, &notes).is_none());
+        let still = still_in_the_trash(&read).unwrap();
+        assert_eq!(still.len(), 1, "only what stayed is still there");
+
+        // And again: what came back is passed over, and what could not
+        // still cannot.
+        let again = history.restore(at).unwrap();
+        assert!(again.restored.is_empty());
+        assert_eq!(again.recorded, Recorded::Nothing);
+        assert_eq!(again.problems, vec![NotRestored::Occupied(notes.clone())]);
+
+        // Restored by hand instead: no longer there, and said so.
+        std::fs::remove_file(&notes).unwrap();
+        let info = &read.runs[1].entries[2].trashed[0].info;
+        std::fs::remove_file(info).unwrap();
+        let by_hand = history.restore(at).unwrap();
+        assert_eq!(by_hand.problems, vec![NotRestored::Gone(notes)]);
     }
 }

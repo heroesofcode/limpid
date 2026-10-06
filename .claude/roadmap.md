@@ -22,10 +22,10 @@ Checked on 2026-09-30:
 - The storage view acts on **files only**. The large things in a treemap are
   directories, and one can be seen at 10 GB and not acted on.
 - No duplicate detection, and no concept of old or unused files.
-- Every removal is written to a history, but there is no undo inside Limpid
-  yet. What goes to the trash can be restored from the file manager. What is
-  deleted outright is either regenerable or a file the person chose to
-  delete permanently, behind a second confirmation.
+- Every removal is written to a history, and what went to the trash can be
+  put back from inside Limpid. What is deleted outright is either
+  regenerable or a file the person chose to delete permanently, behind a
+  second confirmation.
 - Scan progress is a spinner: no percentage, no current path, no cancel.
 - No search or filter.
 
@@ -201,10 +201,14 @@ lose something irreplaceable.
   the folder it came from. Verified against a real trash redirected to a
   fixture, in a child process, since the trash crate follows
   `XDG_DATA_HOME` and nothing else.
-- Undo for anything that went to the trash, from inside Limpid. The record
-  above is what it restores from: match the recorded `.trashinfo`, origin
-  and deletion time against the trash as it is then, and refuse rather
-  than overwrite when something now occupies the original path.
+- Undo for anything that went to the trash, from inside Limpid — **done**:
+  `History::restore`, Put back on a History card and on the storage page's
+  notice, `limpid-cli restore`. The record above is what it restores from:
+  the recorded `.trashinfo`, origin and arrival time are matched against
+  the trash as it is then, and something now at the original path keeps
+  the item in the trash rather than being replaced (safety rule 15).
+  Putting back is a run of its own in the history, so History can say of
+  each thing whether it is in the trash, put back, or gone.
 - Permanent deletion of directories in the storage view, now that there is
   a record of it
 - Render `Guard::boundaries()` in Settings. The safety model is the product's

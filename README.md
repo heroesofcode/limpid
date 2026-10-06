@@ -112,11 +112,18 @@ itself, so nothing goes through Limpid without a record, and a dry run writes
 nothing because it removed nothing. If the record cannot be written, the run
 says so.
 
+Whatever a run sent to the trash can be put back from there: **Put back** on
+its card in History, beside the notice on the storage page right after
+moving something there, or `limpid-cli restore`. Each thing is found by the
+trash's own record of it, so a different file that arrived later under the
+same name is never mistaken for it, and nothing is ever put over a file that
+is where it was now — that one stays in the trash, and you are told. History
+says, for each thing that went there, whether it is still in the trash, was
+put back, or is gone.
+
 It is kept in `~/.local/state/limpid/history.jsonl`, one line per run, and
 Limpid only ever adds to the end of it: a crash costs at most the line being
-written, and a line that cannot be read costs only itself. Whatever went to
-the trash is recorded under the trash's own name for it, so it can be found
-there again even when the trash had to rename it.
+written, and a line that cannot be read costs only itself.
 
 ## Using it
 
@@ -131,6 +138,8 @@ limpid-cli storage                     # where the space went
 limpid-cli storage --path ~/Downloads
 limpid-cli history                     # what was removed, and where it went
 limpid-cli history --json
+limpid-cli restore                     # put back the latest run still in the trash
+limpid-cli restore --run 3             # or the third, as history numbers them
 limpid-cli config                      # what Limpid remembers
 limpid-cli exclude ~/.cache/thumbnails # never offer or remove this
 limpid-cli exclude --remove ~/.cache/thumbnails
@@ -246,7 +255,7 @@ PKGBUILD.
 | Release | What it adds |
 |---|---|
 | 0.4 | Settings and exclusions ✓ · project build artifacts ✓ · folders in the storage view ✓ · the first AUR release |
-| 0.5 | History of every run ✓ · undo from the trash · deleting folders for good · the safety rules on screen |
+| 0.5 | History of every run ✓ · undo from the trash ✓ · deleting folders for good · the safety rules on screen |
 | 0.6 | Duplicate files · large files nobody has opened in years |
 | 0.7 | Exact accounting: what a removal really frees on btrfs, and a check afterwards |
 | 0.8 | Reclaiming space without deleting anything: deduplication, recompression, snapshot thinning |

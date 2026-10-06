@@ -1,6 +1,6 @@
 //! Application state and the top-level view.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -91,6 +91,17 @@ pub struct Cleaned {
     /// What the helper did, if it was asked. The error is already a
     /// sentence, because it has to survive crossing a task boundary.
     pub elevated: Option<Result<Report, String>>,
+}
+
+/// The history as the page shows it.
+#[derive(Debug, Clone, Default)]
+pub struct Recall {
+    /// What was read.
+    pub read: history::Read,
+    /// What of it is still in the trash, by `.trashinfo`. `None` when the
+    /// trash could not be listed, so nothing is said about where anything
+    /// is rather than something wrong.
+    pub inside: Option<HashSet<PathBuf>>,
 }
 
 /// What was just excluded, kept so the notice can offer to put it back.
@@ -370,7 +381,11 @@ pub struct State {
     /// Why the last change to the config file did not stick.
     config_error: Option<String>,
     /// The history, as last read. `None` until the page is first opened.
-    history: Option<Result<history::Read, String>>,
+    history: Option<Result<Recall, String>>,
+    /// Whether something is being put back from the trash.
+    restoring: bool,
+    /// What the last putting back did.
+    restoration: Option<Result<history::Restoration, String>>,
     /// What was just excluded from the overview.
     excluded: Option<Excluded>,
     /// The path being typed on the settings page.
@@ -440,7 +455,11 @@ pub enum Message {
     /// Emptying the trash finished, or was sent back to its confirmation.
     TrashEmptied(Box<Emptying>),
     /// The history was read.
-    HistoryRead(Box<Result<history::Read, String>>),
+    HistoryRead(Box<Result<Recall, String>>),
+    /// Put back what the run at this time sent to the trash.
+    Restore(u64),
+    /// Putting back finished.
+    Restored(Box<Result<history::Restoration, String>>),
     /// Nothing happened worth reacting to.
     Nothing,
     /// Show a file in the desktop's file manager.
@@ -491,6 +510,8 @@ impl State {
             roots,
             config_error: None,
             history: None,
+            restoring: false,
+            restoration: None,
             excluded: None,
             draft: String::new(),
             scans: 0,
@@ -504,8 +525,31 @@ impl State {
     }
 
     /// The history, as last read. `None` until it has been.
-    pub fn history(&self) -> Option<&Result<history::Read, String>> {
+    pub fn history(&self) -> Option<&Result<Recall, String>> {
         self.history.as_ref()
+    }
+
+    /// Whether something is being put back from the trash.
+    pub fn is_restoring(&self) -> bool {
+        self.restoring
+    }
+
+    /// What the last putting back did.
+    pub fn restoration(&self) -> Option<&Result<history::Restoration, String>> {
+        self.restoration.as_ref()
+    }
+
+    /// Read the history, and what of it is still in the trash.
+    fn load_history(&self) -> Task<Message> {
+        let history = History::at(&self.roots);
+        Task::perform(
+            async move {
+                tokio::task::spawn_blocking(move || read_history(&history))
+                    .await
+                    .unwrap_or_else(|error| Err(error.to_string()))
+            },
+            |read| Message::HistoryRead(Box::new(read)),
+        )
     }
 
     /// Where the history is kept.
@@ -705,6 +749,7 @@ impl State {
                 self.excluded = None;
                 self.storage.excluded = None;
                 self.config_error = None;
+                self.restoration = None;
                 // Read again, so an edit made by hand while the window was
                 // open is what the page shows.
                 if page == Page::Settings {
@@ -719,21 +764,51 @@ impl State {
                 // Every time, not once: anything removed since, by this
                 // window or the command line, belongs on it.
                 if page == Page::History {
-                    let history = History::at(&self.roots);
-                    return Task::perform(
-                        async move {
-                            tokio::task::spawn_blocking(move || read_history(&history))
-                                .await
-                                .unwrap_or_else(|error| Err(error.to_string()))
-                        },
-                        |read| Message::HistoryRead(Box::new(read)),
-                    );
+                    return self.load_history();
                 }
                 Task::none()
             }
             Message::HistoryRead(read) => {
                 self.history = Some(*read);
                 Task::none()
+            }
+            Message::Restore(at) => {
+                // Nothing is lost by asking, so it acts at once, as
+                // excluding does. One at a time: two at once could race for
+                // the same thing in the trash.
+                if self.restoring {
+                    return Task::none();
+                }
+                self.restoring = true;
+                self.restoration = None;
+                let history = History::at(&self.roots);
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            history.restore(at).map_err(|error| error.to_string())
+                        })
+                        .await
+                        .unwrap_or_else(|error| Err(error.to_string()))
+                    },
+                    |restored| Message::Restored(Box::new(restored)),
+                )
+            }
+            Message::Restored(restored) => {
+                self.restoring = false;
+                self.restoration = Some(*restored);
+                // The notice about sending them to the trash describes
+                // something that has just been undone.
+                self.storage.outcome = None;
+                // What came back is on the disk again, so the page that
+                // shows it measures, or reads, again.
+                match self.page {
+                    Page::History => self.load_history(),
+                    Page::Storage => match self.storage.trail.last().cloned() {
+                        Some(path) => Task::done(Message::Explore(path)),
+                        None => Task::none(),
+                    },
+                    _ => Task::none(),
+                }
             }
             Message::Explore(path) => {
                 // Cleared on every move. A selection that survived
@@ -1528,14 +1603,17 @@ pub fn selectable(target: &Target) -> bool {
         && (target.is_actionable() || target.privileged.is_some())
 }
 
-/// The history, or a sentence saying why it could not be read.
-fn read_history(history: &History) -> Result<history::Read, String> {
-    history.read().map_err(|error| {
+/// The history and what of it is still in the trash, or a sentence saying
+/// why it could not be read.
+fn read_history(history: &History) -> Result<Recall, String> {
+    let read = history.read().map_err(|error| {
         format!(
             "The history in {} could not be read: {error}",
             history.path().display()
         )
-    })
+    })?;
+    let inside = history::still_in_the_trash(&read);
+    Ok(Recall { read, inside })
 }
 
 /// What the person asked never to be offered or removed, read from the file
@@ -1587,12 +1665,39 @@ mod tests {
         let read = read_history(&History::at(&state.roots));
         let _ = state.update(Message::HistoryRead(Box::new(read)));
 
-        let Some(Ok(read)) = state.history() else {
+        let Some(Ok(recall)) = state.history() else {
             panic!("read, not {:?}", state.history());
         };
+        let read = &recall.read;
         assert_eq!(read.runs.len(), 1);
         assert_eq!(read.runs[0].entries[0].name, "Thumbnails");
         assert!(state.history_path().starts_with(dir.path()));
+    }
+
+    #[test]
+    fn putting_back_is_one_at_a_time_and_clears_what_it_undid() {
+        let (mut state, _dir) = boot();
+        state.storage.outcome = Some((Removal::Trashed, Outcome::default()));
+
+        let _ = state.update(Message::Restore(1));
+        assert!(state.is_restoring());
+        // A second press while the first is under way does nothing.
+        let _ = state.update(Message::Restore(2));
+        assert!(state.is_restoring());
+
+        let _ = state.update(Message::Restored(Box::new(Ok(
+            history::Restoration::default(),
+        ))));
+
+        assert!(!state.is_restoring());
+        assert!(state.restoration().is_some());
+        assert!(state.storage.outcome.is_none());
+
+        let _ = state.update(Message::Navigate(Page::Overview));
+        assert!(
+            state.restoration().is_none(),
+            "a notice stays with its page"
+        );
     }
 
     #[test]

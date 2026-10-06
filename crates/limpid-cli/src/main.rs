@@ -6,6 +6,7 @@
 
 #![forbid(unsafe_code)]
 
+use std::collections::HashSet;
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
@@ -102,6 +103,14 @@ enum Command {
         /// How many runs to show. 0 shows every one.
         #[arg(long, default_value_t = 20)]
         last: usize,
+    },
+    /// Put back what a run sent to the trash, wherever it is still there.
+    /// Nothing is put over a file that is there now.
+    Restore {
+        /// Which run, counting from the newest as `history` numbers them.
+        /// Without it, the newest run with anything still in the trash.
+        #[arg(long, value_name = "N")]
+        run: Option<usize>,
     },
     /// Show the settings in force, and where they came from.
     Config,
@@ -257,13 +266,59 @@ fn main() -> Result<()> {
                     .map_err(io::Error::from)
                     .and_then(|()| writeln!(stdout))
             } else {
+                let inside = history::still_in_the_trash(&read);
                 let shown = Listed {
                     read: &read,
+                    inside: inside.as_ref(),
                     last,
                     path: history.path(),
                     home: &context.roots.home,
                 };
                 report_history(&mut stdout, &shown, colour)
+            }
+        }
+        Command::Restore { run } => {
+            let history = History::at(&context.roots);
+            let read = history.read().map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("cannot read {}: {error}", history.path().display()),
+                )
+            })?;
+            let inside = history::still_in_the_trash(&read);
+            let chosen = match run {
+                Some(number) => number.checked_sub(1).and_then(|index| read.runs.get(index)),
+                None => inside
+                    .as_ref()
+                    .and_then(|inside| read.latest_in_the_trash(inside)),
+            };
+            let Some(chosen) = chosen else {
+                eprintln!(
+                    "limpid: {}",
+                    match run {
+                        Some(number) =>
+                            format!("there is no run {number}; `limpid-cli history` numbers them"),
+                        None => "nothing Limpid sent to the trash is still there".to_owned(),
+                    }
+                );
+                std::process::exit(1);
+            };
+            match history.restore(chosen.at) {
+                Ok(restoration) => {
+                    let colour = io::stdout().is_terminal();
+                    let mut stdout = io::stdout().lock();
+                    report_restore(
+                        &mut stdout,
+                        chosen,
+                        &restoration,
+                        &context.roots.home,
+                        colour,
+                    )
+                }
+                Err(error) => {
+                    eprintln!("limpid: {error}");
+                    std::process::exit(1);
+                }
             }
         }
         Command::Config => {
@@ -618,9 +673,44 @@ const ENTRIES_SHOWN: usize = 10;
 /// Everything a history report says.
 struct Listed<'a> {
     read: &'a history::Read,
+    /// What is still in the trash; `None` when it could not be listed.
+    inside: Option<&'a HashSet<PathBuf>>,
     last: usize,
     path: &'a Path,
     home: &'a Path,
+}
+
+/// Print what putting a run back did.
+fn report_restore(
+    out: &mut impl Write,
+    from: &history::Run,
+    restoration: &history::Restoration,
+    home: &Path,
+    colour: bool,
+) -> io::Result<()> {
+    let style = Style { enabled: colour };
+
+    if restoration.restored.is_empty() && restoration.problems.is_empty() {
+        writeln!(out, "Nothing from {} went to the trash.", from.when())?;
+        return Ok(());
+    }
+    if !restoration.restored.is_empty() {
+        writeln!(out, "{} from {}", style.bold("Put back"), from.when())?;
+    }
+    for path in &restoration.restored {
+        writeln!(out, "  {}", config::contract(path, home))?;
+    }
+    for problem in &restoration.problems {
+        writeln!(out, "{} {problem}", style.paint("33", "left"))?;
+    }
+    if let Recorded::Failed(why) = &restoration.recorded {
+        writeln!(
+            out,
+            "{} this was done, but not written to the history: {why}",
+            style.paint("33", "not recorded"),
+        )?;
+    }
+    Ok(())
 }
 
 /// Print what Limpid has removed, newest first.
@@ -628,6 +718,7 @@ fn report_history(out: &mut impl Write, listed: &Listed, colour: bool) -> io::Re
     let style = Style { enabled: colour };
     let Listed {
         read,
+        inside,
         last,
         path,
         home,
@@ -638,8 +729,14 @@ fn report_history(out: &mut impl Write, listed: &Listed, colour: bool) -> io::Re
     }
 
     let shown = if last == 0 { read.runs.len() } else { last };
-    for run in read.runs.iter().take(shown) {
-        writeln!(out, "{}  {}", style.bold(&run.when()), run.summary())?;
+    for (number, run) in read.runs.iter().take(shown).enumerate() {
+        writeln!(
+            out,
+            "{}  {}  {}",
+            style.dim(&format!("{:>2}", number + 1)),
+            style.bold(&run.when()),
+            run.summary(),
+        )?;
 
         for entry in run.entries.iter().take(ENTRIES_SHOWN) {
             let shown = config::contract(&entry.path, home);
@@ -654,9 +751,14 @@ fn report_history(out: &mut impl Write, listed: &Listed, colour: bool) -> io::Re
             } else {
                 String::new()
             };
+            let now = inside
+                .and_then(|inside| read.whereabouts(run, entry, inside))
+                .map_or_else(String::new, |whereabouts| {
+                    format!("  {}", style.paint("36", &whereabouts.describe()))
+                });
             writeln!(
                 out,
-                "  {:>9}  {}{path}{how}",
+                "  {:>9}  {}{path}{how}{now}",
                 human(entry.size.on_disk),
                 entry.name,
             )?;
@@ -673,6 +775,14 @@ fn report_history(out: &mut impl Write, listed: &Listed, colour: bool) -> io::Re
             )?;
         }
 
+        for restored in &run.restored {
+            writeln!(
+                out,
+                "  {}  {}",
+                style.paint("32", " put back"),
+                config::contract(&restored.path, home),
+            )?;
+        }
         for done in &run.operations {
             let mark = if done.succeeded {
                 style.paint("32", "     done")
@@ -1164,13 +1274,23 @@ mod tests {
             entries,
             operations: Vec::new(),
             problems: Vec::new(),
+            restored: Vec::new(),
         }
     }
 
     fn render_history(read: &history::Read, last: usize) -> String {
+        render_history_with(read, None, last)
+    }
+
+    fn render_history_with(
+        read: &history::Read,
+        inside: Option<&HashSet<PathBuf>>,
+        last: usize,
+    ) -> String {
         let mut buffer = Vec::new();
         let listed = Listed {
             read,
+            inside,
             last,
             path: Path::new("/home/x/.local/state/limpid/history.jsonl"),
             home: Path::new("/home/x"),
@@ -1308,6 +1428,122 @@ mod tests {
         assert!(
             output.contains("not written to the history: disk full"),
             "{output}"
+        );
+    }
+
+    fn trashed_entry(name: &str) -> history::Entry {
+        let mut entry = entry(name, &format!("/home/x/{name}"), Disposal::Trash, 4096);
+        entry.trashed = vec![history::Trashed {
+            info: PathBuf::from(format!("/home/x/.local/share/Trash/info/{name}.trashinfo")),
+            original: entry.path.clone(),
+            deleted: 1,
+        }];
+        entry
+    }
+
+    #[test]
+    fn the_history_numbers_its_runs_the_way_restore_counts_them() {
+        let read = history::Read {
+            runs: vec![
+                run_of(2, vec![entry("b", "/home/x/b", Disposal::Trash, 1)]),
+                run_of(1, vec![entry("a", "/home/x/a", Disposal::Trash, 1)]),
+            ],
+            skipped: 0,
+        };
+
+        let output = render_history(&read, 20);
+        let lines: Vec<&str> = output.lines().collect();
+
+        assert!(lines[0].starts_with(" 1  "), "{output}");
+        assert!(lines[2].starts_with(" 2  "), "{output}");
+    }
+
+    #[test]
+    fn the_history_says_where_what_went_to_the_trash_is_now() {
+        let sent = run_of(
+            1,
+            vec![trashed_entry("film.mkv"), trashed_entry("notes.txt")],
+        );
+        let back = history::Run {
+            restored: vec![history::Restored {
+                from: 1,
+                path: PathBuf::from("/home/x/notes.txt"),
+            }],
+            ..run_of(2, Vec::new())
+        };
+        let inside = HashSet::from([PathBuf::from(
+            "/home/x/.local/share/Trash/info/film.mkv.trashinfo",
+        )]);
+        let read = history::Read {
+            runs: vec![back, sent],
+            skipped: 0,
+        };
+
+        let output = render_history_with(&read, Some(&inside), 20);
+
+        assert!(output.contains("film.mkv  in the trash"), "{output}");
+        assert!(output.contains("notes.txt  put back"), "{output}");
+        assert!(
+            output.contains("1 item put back from the trash"),
+            "{output}"
+        );
+        assert!(output.contains("put back  ~/notes.txt"), "{output}");
+    }
+
+    #[test]
+    fn a_restore_says_what_came_back_and_what_stayed() {
+        let from = run_of(
+            1,
+            vec![trashed_entry("film.mkv"), trashed_entry("notes.txt")],
+        );
+        let restoration = history::Restoration {
+            restored: vec![PathBuf::from("/home/x/film.mkv")],
+            problems: vec![history::NotRestored::Occupied(PathBuf::from(
+                "/home/x/notes.txt",
+            ))],
+            recorded: Recorded::Run(2),
+        };
+
+        let mut buffer = Vec::new();
+        report_restore(
+            &mut buffer,
+            &from,
+            &restoration,
+            Path::new("/home/x"),
+            false,
+        )
+        .unwrap();
+        let output = String::from_utf8(buffer).unwrap();
+
+        assert!(output.contains("Put back from"), "{output}");
+        assert!(output.contains("  ~/film.mkv"), "{output}");
+        assert!(
+            output.contains("left in the trash rather than put over it"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn a_restore_of_a_run_that_sent_nothing_to_the_trash_says_so() {
+        let from = run_of(
+            1,
+            vec![entry("cache", "/home/x/.cache/a", Disposal::Delete, 1)],
+        );
+
+        let mut buffer = Vec::new();
+        report_restore(
+            &mut buffer,
+            &from,
+            &history::Restoration::default(),
+            Path::new("/home/x"),
+            false,
+        )
+        .unwrap();
+
+        assert!(
+            String::from_utf8(buffer)
+                .unwrap()
+                .contains("went to the trash")
         );
     }
 }

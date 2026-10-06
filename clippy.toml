@@ -25,6 +25,8 @@ disallowed-methods = [
     { path = "std::fs::remove_dir_all", reason = "files are removed by the executor, after the guard; see .claude/safety.md" },
     { path = "trash::delete", reason = "files are trashed by the executor, after the guard; see .claude/safety.md" },
     { path = "trash::delete_all", reason = "files are trashed by the executor, after the guard; see .claude/safety.md" },
+    { path = "trash::os_limited::purge_all", reason = "the trash is emptied by the executor, after the guard; see .claude/safety.md" },
+    { path = "trash::os_limited::restore_all", reason = "things come back from the trash in one place, matched against the history; see .claude/safety.md" },
 
     # Resolution. Canonicalising follows symlinks, and a symlink is exactly
     # what a bug or an attacker uses to leave a boundary. The guard refuses

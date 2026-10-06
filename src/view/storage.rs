@@ -67,8 +67,17 @@ pub fn view<'a>(palette: Palette, metrics: Metrics, state: &'a State) -> Element
         body = body.push(view::failed(palette, metrics, why));
     }
 
+    if let Some(restored) = state.restoration() {
+        body = body.push(view::restoration(palette, metrics, restored, state.home()));
+    }
     if let Some((disposal, outcome)) = &storage.outcome {
-        body = body.push(result(palette, metrics, *disposal, outcome));
+        body = body.push(result(
+            palette,
+            metrics,
+            *disposal,
+            outcome,
+            state.is_restoring(),
+        ));
     }
 
     let selecting = !storage.plan(Disposal::Trash).is_empty();
@@ -508,6 +517,7 @@ fn result<'a>(
     metrics: Metrics,
     removal: Removal,
     outcome: &Outcome,
+    restoring: bool,
 ) -> Element<'a, Message> {
     let line = |good: bool, said: String| {
         row![
@@ -557,6 +567,17 @@ fn result<'a>(
             false,
             format!("This was done, but could not be written to the history: {why}"),
         ));
+    }
+
+    // The way back, where the person is looking when they realise. On a
+    // line of its own, so it is there at any width.
+    if let (Removal::Trashed, Recorded::Run(at)) = (removal, &outcome.recorded) {
+        body = body.push(
+            button(text("Put back").size(ty::BODY_SMALL))
+                .style(style::quiet_button(palette))
+                .padding([6, 14])
+                .on_press_maybe((!restoring).then_some(Message::Restore(*at))),
+        );
     }
 
     container(body)
