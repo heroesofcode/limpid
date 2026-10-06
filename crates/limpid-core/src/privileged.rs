@@ -214,16 +214,7 @@ pub enum RunError {
 }
 
 impl Runner {
-    /// A runner that asks polkit to elevate.
-    pub fn new() -> Self {
-        Self {
-            helper: Self::locate(),
-            elevate: true,
-            sandboxed: false,
-        }
-    }
-
-    /// A runner for a given set of roots.
+    /// A runner that asks polkit to elevate, for a given set of roots.
     ///
     /// When the roots point at a fixture, this refuses instead of running.
     /// `--root` sandboxes the walker, but it cannot sandbox `paccache` or
@@ -231,10 +222,15 @@ impl Runner {
     /// Silently doing that to someone who believed they were testing is the
     /// worst outcome available, so the request is refused rather than
     /// quietly redirected.
+    ///
+    /// The only way to build a runner that elevates. There was a second,
+    /// taking no roots, and the application used it: pointed at a fixture,
+    /// it scanned the fixture and would have trimmed the real pacman cache.
     pub fn for_roots(roots: &crate::paths::Roots) -> Self {
         Self {
+            helper: Self::locate(),
+            elevate: true,
             sandboxed: roots.is_sandboxed(),
-            ..Self::new()
         }
     }
 
@@ -325,12 +321,6 @@ impl Runner {
                 said
             })
         })
-    }
-}
-
-impl Default for Runner {
-    fn default() -> Self {
-        Self::new()
     }
 }
 
