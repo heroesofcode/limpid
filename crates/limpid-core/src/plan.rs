@@ -54,7 +54,7 @@ impl Magnitude {
 }
 
 /// How a target should be got rid of.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Disposal {
     /// Removed outright.

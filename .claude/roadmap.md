@@ -22,9 +22,10 @@ Checked on 2026-09-30:
 - The storage view acts on **files only**. The large things in a treemap are
   directories, and one can be seen at 10 GB and not acted on.
 - No duplicate detection, and no concept of old or unused files.
-- No history, no undo inside Limpid. What goes to the trash can be restored
-  from the file manager. What is deleted outright is either regenerable or a
-  file the person chose to delete permanently, behind a second confirmation.
+- Every removal is written to a history, but there is no undo inside Limpid
+  yet. What goes to the trash can be restored from the file manager. What is
+  deleted outright is either regenerable or a file the person chose to
+  delete permanently, behind a second confirmation.
 - Scan progress is a spinner: no percentage, no current path, no cancel.
 - No search or filter.
 
@@ -190,8 +191,20 @@ itself or sits in the trash. From 0.6 it offers photographs and documents,
 and the trust infrastructure has to exist before the first feature that can
 lose something irreplaceable.
 
-- History of every run: what was removed, how big, where it went, when
-- Undo for anything that went to the trash, from inside Limpid
+- History of every run — **done**: `crate::history`, the History page and
+  `limpid-cli history`. One appended JSON line per run in
+  `$XDG_STATE_HOME/limpid/history.jsonl`, written by the executor itself
+  (and by the runner for the helper's operations), so no front-end can
+  remove something without a record. What went to the trash is recorded
+  under the trash's own `.trashinfo`, found by what arrived during the run
+  rather than by name alone: the trash renames on collision and resolves
+  the folder it came from. Verified against a real trash redirected to a
+  fixture, in a child process, since the trash crate follows
+  `XDG_DATA_HOME` and nothing else.
+- Undo for anything that went to the trash, from inside Limpid. The record
+  above is what it restores from: match the recorded `.trashinfo`, origin
+  and deletion time against the trash as it is then, and refuse rather
+  than overwrite when something now occupies the original path.
 - Permanent deletion of directories in the storage view, now that there is
   a record of it
 - Render `Guard::boundaries()` in Settings. The safety model is the product's
