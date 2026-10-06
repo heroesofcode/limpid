@@ -8,6 +8,7 @@ use iced::widget::text::Wrapping;
 use iced::widget::{Space, checkbox, column, container, row, text};
 use iced::{Alignment, Element, Length};
 
+use limpid_core::history::Recorded;
 use limpid_core::model::{Category, Risk, Scan, Target};
 use limpid_core::size::human;
 use limpid_theme::{Color, Palette};
@@ -430,6 +431,12 @@ fn result<'a>(palette: Palette, metrics: Metrics, cleaned: &'a Cleaned) -> Eleme
 
     for problem in &outcome.problems {
         body = body.push(line(false, problem.to_string()));
+    }
+    if let Recorded::Failed(why) = &outcome.recorded {
+        body = body.push(line(
+            false,
+            format!("This was done, but could not be written to the history: {why}"),
+        ));
     }
 
     match &cleaned.elevated {

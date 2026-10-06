@@ -1940,6 +1940,7 @@ dependencies = [
 name = "limpid-core"
 version = "0.3.0"
 dependencies = [
+ "chrono",
  "dirs",
  "ignore",
  "rayon",

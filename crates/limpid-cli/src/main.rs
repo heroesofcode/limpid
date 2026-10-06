@@ -15,6 +15,7 @@ use limpid_core::analyse::{self, Survey};
 use limpid_core::catalog::{self, Context};
 use limpid_core::config::{self, Store};
 use limpid_core::execute::{Executor, Outcome, Problem};
+use limpid_core::history::{self, History, Recorded};
 use limpid_core::model::{Risk, Scan};
 use limpid_core::paths::{ROOT_OVERRIDE, Roots};
 use limpid_core::plan::{Magnitude, Plan, Selection};
@@ -91,6 +92,16 @@ enum Command {
         /// How many of the largest individual files to list.
         #[arg(long, default_value_t = 10)]
         files: usize,
+    },
+    /// Show what Limpid has removed, newest first: what, how large, where
+    /// it went, and when.
+    History {
+        /// Print machine-readable output, every run in full.
+        #[arg(long)]
+        json: bool,
+        /// How many runs to show. 0 shows every one.
+        #[arg(long, default_value_t = 20)]
+        last: usize,
     },
     /// Show the settings in force, and where they came from.
     Config,
@@ -229,6 +240,30 @@ fn main() -> Result<()> {
                     eprintln!("cannot read {}: {error}", root.display());
                     std::process::exit(1);
                 }
+            }
+        }
+        Command::History { json, last } => {
+            let history = History::at(&context.roots);
+            let read = history.read().map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("cannot read {}: {error}", history.path().display()),
+                )
+            })?;
+            let colour = io::stdout().is_terminal();
+            let mut stdout = io::stdout().lock();
+            if json {
+                serde_json::to_writer_pretty(&mut stdout, &read.runs)
+                    .map_err(io::Error::from)
+                    .and_then(|()| writeln!(stdout))
+            } else {
+                let shown = Listed {
+                    read: &read,
+                    last,
+                    path: history.path(),
+                    home: &context.roots.home,
+                };
+                report_history(&mut stdout, &shown, colour)
             }
         }
         Command::Config => {
@@ -566,6 +601,121 @@ fn report_clean(out: &mut impl Write, shown: &Shown, colour: bool) -> io::Result
         writeln!(out, "{} {problem}", style.paint("31", label))?;
     }
 
+    if let Recorded::Failed(why) = &outcome.recorded {
+        writeln!(
+            out,
+            "{} this was done, but not written to the history: {why}",
+            style.paint("33", "not recorded"),
+        )?;
+    }
+
+    Ok(())
+}
+
+/// Entries listed under each run before the rest are counted instead.
+const ENTRIES_SHOWN: usize = 10;
+
+/// Everything a history report says.
+struct Listed<'a> {
+    read: &'a history::Read,
+    last: usize,
+    path: &'a Path,
+    home: &'a Path,
+}
+
+/// Print what Limpid has removed, newest first.
+fn report_history(out: &mut impl Write, listed: &Listed, colour: bool) -> io::Result<()> {
+    let style = Style { enabled: colour };
+    let Listed {
+        read,
+        last,
+        path,
+        home,
+    } = *listed;
+
+    if read.runs.is_empty() {
+        writeln!(out, "Nothing has been removed yet.")?;
+    }
+
+    let shown = if last == 0 { read.runs.len() } else { last };
+    for run in read.runs.iter().take(shown) {
+        writeln!(out, "{}  {}", style.bold(&run.when()), run.summary())?;
+
+        for entry in run.entries.iter().take(ENTRIES_SHOWN) {
+            let shown = config::contract(&entry.path, home);
+            let path = if shown == entry.name {
+                String::new()
+            } else {
+                format!("  {}", style.dim(&shown))
+            };
+            // Said per entry only when the run went two ways.
+            let how = if run.disposal().is_none() {
+                format!("  {}", style.dim(entry.disposal.describe()))
+            } else {
+                String::new()
+            };
+            writeln!(
+                out,
+                "  {:>9}  {}{path}{how}",
+                human(entry.size.on_disk),
+                entry.name,
+            )?;
+        }
+        if run.entries.len() > ENTRIES_SHOWN {
+            writeln!(
+                out,
+                "  {:>9}  {}",
+                "",
+                style.dim(&format!(
+                    "and {} more; --json lists every one",
+                    run.entries.len() - ENTRIES_SHOWN
+                )),
+            )?;
+        }
+
+        for done in &run.operations {
+            let mark = if done.succeeded {
+                style.paint("32", "     done")
+            } else {
+                style.paint("31", "   failed")
+            };
+            writeln!(out, "  {mark}  {}: {}", done.operation, done.detail)?;
+        }
+        for problem in &run.problems {
+            writeln!(out, "  {}  {}", style.paint("31", " not done"), problem)?;
+        }
+    }
+
+    if read.runs.len() > shown {
+        writeln!(
+            out,
+            "{}",
+            style.dim(&format!(
+                "{} older runs; --last 0 shows every one.",
+                read.runs.len() - shown
+            )),
+        )?;
+    }
+    if read.skipped > 0 {
+        writeln!(
+            out,
+            "{}",
+            style.paint(
+                "33",
+                &format!(
+                    "{} in {} could not be read, and {} not shown; the file is left as it is.",
+                    if read.skipped == 1 {
+                        "One line".to_owned()
+                    } else {
+                        format!("{} lines", read.skipped)
+                    },
+                    config::contract(path, home),
+                    if read.skipped == 1 { "is" } else { "are" },
+                ),
+            ),
+        )?;
+    }
+
     Ok(())
 }
 
@@ -795,6 +945,7 @@ fn show_theme(out: &mut impl Write, theme: &limpid_theme::Theme, colour: bool) -
 mod tests {
     use super::*;
     use limpid_core::model::{Category, Kind, Target};
+    use limpid_core::plan::Disposal;
     use limpid_core::size::Size;
 
     fn scan_with(targets: Vec<Target>) -> Scan {
@@ -993,5 +1144,170 @@ mod tests {
         let caveat = output.find("Snapshots exist").unwrap();
 
         assert!(caveat > totals);
+    }
+
+    fn entry(name: &str, path: &str, disposal: Disposal, bytes: u64) -> history::Entry {
+        history::Entry {
+            name: name.to_owned(),
+            path: PathBuf::from(path),
+            disposal,
+            size: Size::new(bytes, bytes),
+            files: 1,
+            trashed: Vec::new(),
+        }
+    }
+
+    fn run_of(at: u64, entries: Vec<history::Entry>) -> history::Run {
+        history::Run {
+            version: history::VERSION,
+            at,
+            entries,
+            operations: Vec::new(),
+            problems: Vec::new(),
+        }
+    }
+
+    fn render_history(read: &history::Read, last: usize) -> String {
+        let mut buffer = Vec::new();
+        let listed = Listed {
+            read,
+            last,
+            path: Path::new("/home/x/.local/state/limpid/history.jsonl"),
+            home: Path::new("/home/x"),
+        };
+        report_history(&mut buffer, &listed, false).unwrap();
+        String::from_utf8(buffer).unwrap()
+    }
+
+    #[test]
+    fn the_history_says_what_went_where_newest_first() {
+        let read = history::Read {
+            runs: vec![
+                run_of(
+                    2_000_000,
+                    vec![entry(
+                        "film.mkv",
+                        "/home/x/Videos/film.mkv",
+                        Disposal::Trash,
+                        4096,
+                    )],
+                ),
+                run_of(
+                    1_000_000,
+                    vec![entry(
+                        "Thumbnails",
+                        "/home/x/.cache/thumbnails",
+                        Disposal::Delete,
+                        2048,
+                    )],
+                ),
+            ],
+            skipped: 0,
+        };
+
+        let output = render_history(&read, 20);
+
+        let film = output.find("film.mkv").unwrap();
+        let thumbnails = output.find("Thumbnails").unwrap();
+        assert!(film < thumbnails, "{output}");
+        assert!(output.contains("moved to the trash"), "{output}");
+        assert!(output.contains("removed permanently"), "{output}");
+        assert!(output.contains("~/.cache/thumbnails"), "{output}");
+    }
+
+    #[test]
+    fn an_empty_history_says_so() {
+        let output = render_history(&history::Read::default(), 20);
+
+        assert!(output.contains("Nothing has been removed yet"), "{output}");
+    }
+
+    #[test]
+    fn a_run_that_went_two_ways_says_which_way_each_thing_went() {
+        let read = history::Read {
+            runs: vec![run_of(
+                1,
+                vec![
+                    entry("a.iso", "/home/x/a.iso", Disposal::Trash, 10),
+                    entry("b.iso", "/home/x/b.iso", Disposal::Delete, 10),
+                ],
+            )],
+            skipped: 0,
+        };
+
+        let output = render_history(&read, 20);
+
+        assert!(output.contains("some removed permanently\n"), "{output}");
+        assert!(output.contains("a.iso  moved to the trash"), "{output}");
+        assert!(output.contains("b.iso  removed permanently"), "{output}");
+    }
+
+    #[test]
+    fn a_long_run_is_listed_in_part_and_says_how_much_is_left_out() {
+        let entries = (0..12)
+            .map(|n| {
+                entry(
+                    &format!("{n}.iso"),
+                    &format!("/home/x/{n}.iso"),
+                    Disposal::Trash,
+                    1,
+                )
+            })
+            .collect();
+        let read = history::Read {
+            runs: vec![run_of(1, entries)],
+            skipped: 0,
+        };
+
+        let output = render_history(&read, 20);
+
+        assert!(output.contains("9.iso"), "{output}");
+        assert!(!output.contains("10.iso"), "{output}");
+        assert!(output.contains("and 2 more"), "{output}");
+    }
+
+    #[test]
+    fn older_runs_are_counted_rather_than_silently_dropped() {
+        let runs = (0..3)
+            .map(|n| run_of(n, vec![entry("a", "/home/x/a", Disposal::Trash, 1)]))
+            .collect();
+        let read = history::Read { runs, skipped: 0 };
+
+        assert!(render_history(&read, 1).contains("2 older runs"));
+        assert!(!render_history(&read, 0).contains("older runs"));
+    }
+
+    #[test]
+    fn lines_that_could_not_be_read_are_mentioned_not_hidden() {
+        let read = history::Read {
+            runs: Vec::new(),
+            skipped: 2,
+        };
+
+        let output = render_history(&read, 20);
+
+        assert!(
+            output.contains("2 lines in ~/.local/state/limpid/history.jsonl"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn a_clean_that_could_not_be_written_down_says_so() {
+        let plan = Plan::from_targets(&[Target::new("cache", Kind::Cache, Risk::Safe)
+            .path("/home/x/.cache/thing")
+            .measured(Size::new(10, 10), 1)]);
+        let outcome = Outcome {
+            applied: true,
+            recorded: Recorded::Failed("disk full".to_owned()),
+            ..Outcome::default()
+        };
+
+        let output = render_clean(&plan, &outcome);
+
+        assert!(
+            output.contains("not written to the history: disk full"),
+            "{output}"
+        );
     }
 }
