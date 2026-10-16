@@ -72,11 +72,11 @@ jobs:
               check_line=""
             fi
 
-            started=""
             status=""
             conclusion=""
             if [[ -n "$check_line" ]]; then
-              IFS=$'\t' read -r started status conclusion <<<"$check_line"
+              # started_at is only used for sort ordering above; discard it.
+              IFS=$'\t' read -r _ status conclusion <<<"$check_line"
             fi
 
             if [[ "$review_state" == "APPROVED" ]]; then
