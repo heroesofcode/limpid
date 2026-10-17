@@ -363,20 +363,30 @@ fn locate(before: &HashSet<OsString>, sent: &[PathBuf]) -> Vec<Option<Trashed>> 
 ///
 /// Only what arrived counts, so something of the same name trashed last
 /// week is never mistaken for it. Among the arrivals, the name decides; the
-/// trash keeps the original name even when it has to rename the file. When
-/// two arrivals share a name — two `notes.txt` from different folders — the
-/// folder decides, and when even that is ambiguous nothing is claimed: a
-/// record that cannot find something is honest, one that points at the
+/// trash keeps the original name even when it has to rename the file. A
+/// name that arrived once, and was sent once, is that file even where the
+/// trash resolved the folder, which is why the name alone decides there.
+/// Whether a name is ambiguous is decided from everything that arrived in
+/// the run and every path of that name that was sent, not from what is left
+/// after an earlier path has claimed one — a later `notes.txt` would
+/// otherwise be paired with whatever same-name stranger remained. When the
+/// name is ambiguous, only an arrival whose original path is exactly the
+/// one sent, and the only such arrival, is claimed; otherwise nothing is.
+/// A record that cannot find something is honest, one that points at the
 /// wrong thing would put it back in the wrong place.
 fn identify(
     before: &HashSet<OsString>,
     now: Vec<trash::TrashItem>,
     sent: &[PathBuf],
 ) -> Vec<Option<Trashed>> {
-    let mut arrived: Vec<trash::TrashItem> = now
+    let arrived: Vec<trash::TrashItem> = now
         .into_iter()
         .filter(|item| !before.contains(&item.id))
         .collect();
+    // Left in place once claimed. Removing one would make the next path of
+    // the same name count what remains, and a single leftover stranger
+    // would look like the only thing that arrived.
+    let mut claimed = vec![false; arrived.len()];
 
     sent.iter()
         .map(|path| {
@@ -387,23 +397,31 @@ fn identify(
                 .filter(|(_, item)| item.name == name)
                 .map(|(index, _)| index)
                 .collect();
-            let index = match named.as_slice() {
-                [only] => *only,
-                several => {
-                    let mut same = several
-                        .iter()
-                        .copied()
-                        .filter(|&index| arrived[index].original_path() == *path);
-                    match (same.next(), same.next()) {
-                        (Some(index), None) => index,
-                        _ => return None,
-                    }
+            let sent_with_name = sent
+                .iter()
+                .filter(|sent| sent.file_name() == Some(name))
+                .count();
+            let ambiguous = named.len() > 1 || sent_with_name > 1;
+            let index = if ambiguous {
+                let mut same = named
+                    .iter()
+                    .copied()
+                    .filter(|&index| arrived[index].original_path() == *path);
+                match (same.next(), same.next()) {
+                    (Some(index), None) if !claimed[index] => index,
+                    _ => return None,
+                }
+            } else {
+                match named.as_slice() {
+                    [only] if !claimed[*only] => *only,
+                    _ => return None,
                 }
             };
-            let item = arrived.swap_remove(index);
+            claimed[index] = true;
+            let item = &arrived[index];
             Some(Trashed {
                 original: item.original_path(),
-                info: PathBuf::from(item.id),
+                info: PathBuf::from(&item.id),
                 deleted: item.time_deleted,
             })
         })
@@ -641,6 +659,138 @@ mod tests {
         );
 
         assert_eq!(found, vec![None]);
+    }
+
+    #[test]
+    fn two_sent_notes_from_different_folders_are_both_matched_by_origin() {
+        let now = vec![
+            item("/t/info/notes.txt.trashinfo", "/home/x/a/notes.txt", 1),
+            item("/t/info/notes.2.txt.trashinfo", "/home/x/b/notes.txt", 2),
+        ];
+        let sent = [
+            PathBuf::from("/home/x/a/notes.txt"),
+            PathBuf::from("/home/x/b/notes.txt"),
+        ];
+
+        let found = identify(&HashSet::new(), now, &sent);
+
+        assert_eq!(
+            found,
+            vec![
+                Some(Trashed {
+                    info: PathBuf::from("/t/info/notes.txt.trashinfo"),
+                    original: PathBuf::from("/home/x/a/notes.txt"),
+                    deleted: 1,
+                }),
+                Some(Trashed {
+                    info: PathBuf::from("/t/info/notes.2.txt.trashinfo"),
+                    original: PathBuf::from("/home/x/b/notes.txt"),
+                    deleted: 2,
+                }),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_sent_file_is_not_paired_with_a_same_name_stranger_from_the_same_window() {
+        // One notes.txt was sent. Another arrived in the same window from
+        // somewhere this run never touched. The sent one is the arrival
+        // whose origin is that path; the stranger is not claimed.
+        let now = vec![
+            item("/t/info/notes.2.txt.trashinfo", "/tmp/other/notes.txt", 2),
+            item("/t/info/notes.txt.trashinfo", "/home/x/a/notes.txt", 1),
+        ];
+
+        let found = identify(
+            &HashSet::new(),
+            now,
+            &[PathBuf::from("/home/x/a/notes.txt")],
+        );
+
+        assert_eq!(
+            found,
+            vec![Some(Trashed {
+                info: PathBuf::from("/t/info/notes.txt.trashinfo"),
+                original: PathBuf::from("/home/x/a/notes.txt"),
+                deleted: 1,
+            })]
+        );
+    }
+
+    #[test]
+    fn a_resolved_origin_is_not_guessed_when_a_same_name_stranger_arrived_too() {
+        // `/home` a link, so the trash wrote a different folder, and a
+        // second notes.txt arrived from elsewhere. Neither origin is the
+        // path that was sent, so the sent file is left unclaimed and the
+        // stranger is not claimed either.
+        let now = vec![
+            item("/t/info/notes.txt.trashinfo", "/var/home/x/a/notes.txt", 1),
+            item("/t/info/notes.2.txt.trashinfo", "/tmp/other/notes.txt", 2),
+        ];
+
+        let found = identify(
+            &HashSet::new(),
+            now,
+            &[PathBuf::from("/home/x/a/notes.txt")],
+        );
+
+        assert_eq!(found, vec![None]);
+    }
+
+    #[test]
+    fn an_earlier_claim_does_not_make_a_leftover_same_name_arrival_unique() {
+        // The first path takes the arrival that came from it. One notes.txt
+        // remains, but it arrived beside the other, so the name was already
+        // ambiguous: the later path is not paired with that leftover.
+        let now = vec![
+            item("/t/info/notes.txt.trashinfo", "/home/x/a/notes.txt", 1),
+            item("/t/info/notes.2.txt.trashinfo", "/tmp/other/notes.txt", 2),
+        ];
+        let sent = [
+            PathBuf::from("/home/x/a/notes.txt"),
+            PathBuf::from("/home/x/b/notes.txt"),
+        ];
+
+        let found = identify(&HashSet::new(), now, &sent);
+
+        assert_eq!(
+            found[0],
+            Some(Trashed {
+                info: PathBuf::from("/t/info/notes.txt.trashinfo"),
+                original: PathBuf::from("/home/x/a/notes.txt"),
+                deleted: 1,
+            })
+        );
+        assert_eq!(found[1], None);
+    }
+
+    #[test]
+    fn the_only_arrival_of_a_repeated_name_is_not_given_to_the_wrong_path() {
+        // Two notes.txt were sent and only one arrived, from b. a is sent
+        // first, so what is left would hand a the only arrival. The name
+        // was sent twice, so it goes to the path the trash says it came
+        // from, or to neither.
+        let now = vec![item(
+            "/t/info/notes.txt.trashinfo",
+            "/home/x/b/notes.txt",
+            1,
+        )];
+        let sent = [
+            PathBuf::from("/home/x/a/notes.txt"),
+            PathBuf::from("/home/x/b/notes.txt"),
+        ];
+
+        let found = identify(&HashSet::new(), now, &sent);
+
+        assert_eq!(found[0], None);
+        assert_eq!(
+            found[1],
+            Some(Trashed {
+                info: PathBuf::from("/t/info/notes.txt.trashinfo"),
+                original: PathBuf::from("/home/x/b/notes.txt"),
+                deleted: 1,
+            })
+        );
     }
 
     #[test]
