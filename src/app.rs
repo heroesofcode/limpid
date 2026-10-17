@@ -558,6 +558,12 @@ impl State {
         &self.config
     }
 
+    /// Where to look. Settings reads the guard's boundaries from these;
+    /// the list is not copied into the window.
+    pub fn roots(&self) -> &Roots {
+        &self.roots
+    }
+
     /// Why the last change to the config file did not stick.
     pub fn config_error(&self) -> Option<&str> {
         self.config_error.as_deref()

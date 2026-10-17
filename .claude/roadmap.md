@@ -207,8 +207,10 @@ lose something irreplaceable.
   than overwrite when something now occupies the original path.
 - Permanent deletion of directories in the storage view, now that there is
   a record of it
-- Render `Guard::boundaries()` in Settings. The safety model is the product's
-  best argument and it is currently invisible.
+- Render `Guard::boundaries()` in Settings — **done**. The page lists those
+  directories, with `~` under home, and says what the list is and what an
+  explicit choice and build output still require. `limpid-cli boundaries`
+  prints the same list.
 
 ## 0.6 — Generic findings
 

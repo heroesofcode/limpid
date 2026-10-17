@@ -134,11 +134,18 @@ limpid-cli history --json
 limpid-cli config                      # what Limpid remembers
 limpid-cli exclude ~/.cache/thumbnails # never offer or remove this
 limpid-cli exclude --remove ~/.cache/thumbnails
+limpid-cli boundaries                  # where Limpid may remove things
+limpid-cli boundaries --json
 ```
 
 ## Configuration
 
 The Settings page changes the cleaning policy and lists what is excluded.
+It also shows the directories Limpid may ever remove anything from on its
+own. That list is compiled into the program, so nothing on the page can
+edit it; `limpid-cli boundaries` prints the same paths, with `~` for
+anything under your home directory.
+
 Tick something on the Overview or in the storage view and choose **Exclude**
 to stop Limpid offering it; an undo appears beside it. All of it lives in
 `~/.config/limpid/config.toml`, created the first time something is saved,
@@ -205,7 +212,8 @@ some capability for it:
   sits strictly inside a short list of known directories, is not one of those
   directories itself, contains no `..`, and is not a symlink — checked against
   the filesystem as it is at that moment, not as it was when the plan was
-  made. A bug in a scanner should cost a refusal, not a home directory.
+  made. Settings shows that list, and `limpid-cli boundaries` prints it. A
+  bug in a scanner should cost a refusal, not a home directory.
 - **Split privilege, and no path crosses it.** The UI never runs as root.
   System-level cleaning goes to a small helper invoked through polkit, and the
   request it accepts is a fixed set of named operations with bounded
@@ -246,7 +254,7 @@ PKGBUILD.
 | Release | What it adds |
 |---|---|
 | 0.4 | Settings and exclusions ✓ · project build artifacts ✓ · folders in the storage view ✓ · the first AUR release |
-| 0.5 | History of every run ✓ · undo from the trash · deleting folders for good · the safety rules on screen |
+| 0.5 | History of every run ✓ · undo from the trash · deleting folders for good · the safety rules on screen ✓ |
 | 0.6 | Duplicate files · large files nobody has opened in years |
 | 0.7 | Exact accounting: what a removal really frees on btrfs, and a check afterwards |
 | 0.8 | Reclaiming space without deleting anything: deduplication, recompression, snapshot thinning |

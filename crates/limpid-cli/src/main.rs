@@ -15,6 +15,7 @@ use limpid_core::analyse::{self, Survey};
 use limpid_core::catalog::{self, Context};
 use limpid_core::config::{self, Store};
 use limpid_core::execute::{Executor, Outcome, Problem};
+use limpid_core::guard::Guard;
 use limpid_core::history::{self, History, Recorded};
 use limpid_core::model::{Risk, Scan};
 use limpid_core::paths::{ROOT_OVERRIDE, Roots};
@@ -105,6 +106,12 @@ enum Command {
     },
     /// Show the settings in force, and where they came from.
     Config,
+    /// Show the directories Limpid may ever remove anything from.
+    Boundaries {
+        /// Print machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Stop Limpid offering a path, or everything under it. The path is
     /// still counted where space is being accounted for; it is only never
     /// offered for removal, and never removed.
@@ -270,6 +277,12 @@ fn main() -> Result<()> {
             let colour = io::stdout().is_terminal();
             let mut stdout = io::stdout().lock();
             show_config(&mut stdout, &store, &context.roots.home, colour)
+        }
+        Command::Boundaries { json } => {
+            let lines = boundary_lines(&context.roots);
+            let colour = io::stdout().is_terminal();
+            let mut stdout = io::stdout().lock();
+            show_boundaries(&mut stdout, &lines, json, colour)
         }
         Command::Exclude { remove, paths } => {
             if !store.is_writable() {
@@ -821,6 +834,40 @@ fn bar(share: f32, width: usize) -> String {
     bar
 }
 
+/// The guard's boundaries, written as a person would: `~/…` under home.
+fn boundary_lines(roots: &Roots) -> Vec<String> {
+    Guard::new(roots)
+        .boundaries()
+        .iter()
+        .map(|path| config::contract(path, &roots.home))
+        .collect()
+}
+
+/// Print the directories Limpid may ever remove anything from.
+fn show_boundaries(
+    out: &mut impl Write,
+    lines: &[String],
+    json: bool,
+    colour: bool,
+) -> io::Result<()> {
+    if json {
+        // The same strings as the text, so a script and the Settings page
+        // are looking at one list.
+        // `&mut *out` rather than `out`: the reference would otherwise be
+        // moved into the writer and the newline could not follow it.
+        serde_json::to_writer_pretty(&mut *out, lines).map_err(io::Error::from)?;
+        writeln!(out)
+    } else {
+        let style = Style { enabled: colour };
+        writeln!(out, "{}", style.bold("Where Limpid may remove things"))?;
+        writeln!(out)?;
+        for line in lines {
+            writeln!(out, "{line}")?;
+        }
+        Ok(())
+    }
+}
+
 /// Print the settings in force.
 fn show_config(
     out: &mut impl Write,
@@ -1129,6 +1176,46 @@ mod tests {
 
         assert!(output.contains("—  pacnew"), "{output}");
         assert!(output.contains("sensitive"), "{output}");
+    }
+
+    #[test]
+    fn the_boundaries_command_prints_the_guard_list_with_a_tilde_and_as_json() {
+        let roots = Roots::under(Path::new("/fixture"));
+        let lines = boundary_lines(&roots);
+        let guard = Guard::new(&roots);
+
+        assert_eq!(lines.len(), guard.boundaries().len());
+        for path in guard.boundaries() {
+            assert!(lines.contains(&config::contract(path, &roots.home)));
+        }
+
+        assert!(lines.contains(&"~/.cache".to_owned()));
+        assert!(lines.contains(&"~/.cargo/registry".to_owned()));
+        assert!(lines.contains(&"~/.config/chromium".to_owned()));
+        assert!(lines.contains(&"~/.mozilla/firefox".to_owned()));
+        assert!(lines.contains(&"~/.local/share/Trash".to_owned()));
+        assert!(lines.contains(&"/fixture/system/var/cache/pacman/pkg".to_owned()));
+        assert!(lines.contains(&"/fixture/system/var/log/journal".to_owned()));
+        assert!(lines.contains(&"/fixture/system/var/lib/systemd/coredump".to_owned()));
+        assert!(!lines.iter().any(|line| line == "~"));
+
+        let mut buffer = Vec::new();
+        show_boundaries(&mut buffer, &lines, false, false).unwrap();
+        let text = String::from_utf8(buffer).unwrap();
+        assert!(text.contains("Where Limpid may remove things"), "{text}");
+        for line in &lines {
+            assert!(
+                text.lines().any(|printed| printed == line.as_str()),
+                "{line} missing from {text}"
+            );
+        }
+
+        let mut buffer = Vec::new();
+        show_boundaries(&mut buffer, &lines, true, false).unwrap();
+        let json = String::from_utf8(buffer).unwrap();
+        let parsed: Vec<String> = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed, lines);
+        assert!(!json.contains("Where Limpid may remove things"));
     }
 
     #[test]

@@ -5,6 +5,8 @@ use iced::widget::{Space, button, column, container, row, text, text_input};
 use iced::{Alignment, Element, Length};
 
 use limpid_core::config::Store;
+use limpid_core::guard::Guard;
+use limpid_core::paths::Roots;
 use limpid_theme::Palette;
 
 use crate::app::{Direction, Message, Setting, State};
@@ -105,6 +107,7 @@ pub fn view<'a>(palette: Palette, metrics: Metrics, state: &'a State) -> Element
 
     page.push(cleaning(palette, metrics, store))
         .push(exclusions(palette, metrics, store, state.draft()))
+        .push(boundaries(palette, metrics, state))
         .push(theme_card)
         .push(about)
         .into()
@@ -315,6 +318,109 @@ fn exclusions<'a>(
     )
 }
 
+/// The directories removal is confined to.
+///
+/// Read from the guard at draw time. There is no control here: growing the
+/// list is an edit in Rust, and a setting that could widen it would undo the
+/// reason the list is written out by hand.
+fn boundaries<'a>(palette: Palette, metrics: Metrics, state: &'a State) -> Element<'a, Message> {
+    let store = state.config();
+    let roots = state.roots();
+    let guard = Guard::new(roots);
+
+    let mut list = column![].spacing(4).width(Length::Fill);
+    for path in guard.boundaries() {
+        list = list.push(
+            container(
+                // A path is one token. Word wrapping has nowhere to break it,
+                // and at a quarter of a laptop screen it would draw past the
+                // card.
+                text(store.display(path))
+                    .size(ty::BODY_SMALL)
+                    .style(style::body(palette))
+                    .wrapping(Wrapping::WordOrGlyph)
+                    .width(Length::Fill),
+            )
+            .style(style::well(palette))
+            .padding([6, 10])
+            .width(Length::Fill),
+        );
+    }
+
+    let (chosen, build) = explanations(store, roots);
+
+    card(
+        palette,
+        metrics,
+        "Where Limpid may remove things",
+        "Compiled into Limpid, and grown only by a deliberate edit in Rust. \
+         On its own, Limpid removes things only from inside these directories, \
+         and never the directories themselves.",
+        column![
+            list,
+            text(chosen)
+                .size(ty::BODY_SMALL)
+                .style(style::secondary(palette))
+                .wrapping(Wrapping::WordOrGlyph)
+                .width(Length::Fill),
+            text(build)
+                .size(ty::BODY_SMALL)
+                .style(style::secondary(palette))
+                .wrapping(Wrapping::WordOrGlyph)
+                .width(Length::Fill),
+        ]
+        .spacing(ty::GAP)
+        .width(Length::Fill)
+        .into(),
+    )
+}
+
+/// The two paragraphs under the boundary list.
+///
+/// The paths are filled from the guard, so the sentence cannot name a
+/// directory the check does not use. The wording assumes each list has more
+/// than one entry, which it does.
+fn explanations(store: &Store, roots: &Roots) -> (String, String) {
+    let guard = Guard::new(roots);
+    let sacred = list_or(
+        &Guard::sacred()
+            .iter()
+            .map(|relative| store.display(&roots.home.join(relative)))
+            .collect::<Vec<_>>(),
+    );
+    let essential = list_or(
+        &guard
+            .essential()
+            .iter()
+            .map(|path| store.display(path))
+            .collect::<Vec<_>>(),
+    );
+
+    let chosen = format!(
+        "What you tick in Storage is its own category. It has to be inside \
+         your home directory and not your home directory itself, and it cannot \
+         be a symlink anywhere along the path. It can never be {sacred}, or \
+         anything inside them. A folder that holds {essential} cannot be \
+         chosen, nor can those directories themselves, though what is inside \
+         them can.",
+    );
+    let build = "Build output is found by a rule rather than by this list, and \
+                 the rule is checked again when it is removed."
+        .to_owned();
+
+    (chosen, build)
+}
+
+/// "a", "a or b", "a, b or c". No Oxford comma, matching the rest of the copy.
+fn list_or(items: &[String]) -> String {
+    match items {
+        [] => String::new(),
+        [only] => only.clone(),
+        [first, second] => format!("{first} or {second}"),
+        [first, middle @ .., last] => format!("{first}, {} or {last}", middle.join(", ")),
+    }
+}
+
 /// What was wrong with the file when it was read.
 fn file_problems<'a>(palette: Palette, metrics: Metrics, store: &Store) -> Element<'a, Message> {
     let mut lines = column![].spacing(6).width(Length::Fill);
@@ -383,4 +489,36 @@ fn card<'a>(
     .padding(metrics.card)
     .width(Length::Fill)
     .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use limpid_core::guard::Guard;
+    use limpid_core::paths::Roots;
+
+    use super::explanations;
+
+    #[test]
+    fn the_explanation_names_every_sacred_directory_and_every_session_directory() {
+        let roots = Roots::under(Path::new("/fixture"));
+        let store = limpid_core::config::Store::open(&roots);
+        let (chosen, build) = explanations(&store, &roots);
+
+        for relative in Guard::sacred() {
+            let shown = store.display(&roots.home.join(relative));
+            assert!(chosen.contains(&shown), "{chosen} should name {shown}");
+        }
+        for path in Guard::new(&roots).essential() {
+            let shown = store.display(path);
+            assert!(chosen.contains(&shown), "{chosen} should name {shown}");
+        }
+
+        assert!(chosen.contains("home directory itself"), "{chosen}");
+        assert!(chosen.contains("symlink"), "{chosen}");
+        assert!(chosen.contains("what is inside them can"), "{chosen}");
+        assert!(build.contains("found by a rule"), "{build}");
+        assert!(build.contains("checked again"), "{build}");
+    }
 }
