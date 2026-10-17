@@ -218,6 +218,25 @@ impl Guard {
         &self.boundaries
     }
 
+    /// Directories under the home directory that nothing may be removed from,
+    /// however a path was arrived at.
+    ///
+    /// Relative to home — `.ssh`, not a full path — so the list does not
+    /// depend on whose home it is. An explicit choice inside any of these is
+    /// [`Refusal::Sacred`].
+    pub fn sacred() -> &'static [&'static str] {
+        SACRED
+    }
+
+    /// Directories the desktop session lives in.
+    ///
+    /// An explicit choice may not be one of these, and may not be a directory
+    /// that holds one. What is inside them stays choosable: one application's
+    /// leftovers are a reasonable thing to point at.
+    pub fn essential(&self) -> &[PathBuf] {
+        &self.essential
+    }
+
     /// Check a path that is about to be removed, under the permission it
     /// was created with.
     pub fn check_with(&self, path: &Path, permission: Permission) -> Result<(), Refusal> {
@@ -667,6 +686,17 @@ mod tests {
         // application's leftovers, one setting file.
         assert!(guard.check_chosen(&roots.config("someapp")).is_ok());
         assert!(guard.check_chosen(&roots.data("Steam/logs")).is_ok());
+
+        // The same directories the check uses, so a display of them cannot
+        // name a different set.
+        assert_eq!(
+            guard.essential(),
+            &[
+                roots.config.clone(),
+                roots.data.clone(),
+                roots.state.clone(),
+            ]
+        );
     }
 
     #[test]
@@ -800,5 +830,81 @@ mod tests {
         let boundaries = guard.boundaries();
 
         assert!(boundaries.windows(2).all(|pair| pair[0] < pair[1]));
+    }
+
+    #[test]
+    fn the_boundary_list_is_exactly_what_was_granted_by_hand() {
+        let (_fixture, roots, guard) = fixture();
+
+        // Written out here a second time on purpose. The list in `Guard::new`
+        // is the grant; this is the record of it. Adding a place to clean
+        // means editing both, deliberately.
+        let mut expected = vec![
+            roots.cache.clone(),
+            roots.data.join("Trash"),
+            roots.home(".npm"),
+            roots.home(".cargo/registry"),
+            roots.home(".yarn"),
+            roots.home("go/pkg/mod"),
+            roots.home(".var/app"),
+            roots.home(".mozilla/firefox"),
+            roots.system("/var/cache/pacman/pkg"),
+            roots.system("/var/log/journal"),
+            roots.system("/var/lib/systemd/coredump"),
+        ];
+        for browser in [
+            "BraveSoftware",
+            "google-chrome",
+            "chromium",
+            "vivaldi",
+            "microsoft-edge",
+        ] {
+            expected.push(roots.config(browser));
+        }
+        expected.sort();
+        expected.dedup();
+
+        assert_eq!(guard.boundaries(), expected.as_slice());
+    }
+
+    #[test]
+    fn boundaries_under_home_are_written_with_a_tilde_and_system_ones_are_not() {
+        let (_fixture, roots, guard) = fixture();
+
+        for path in guard.boundaries() {
+            let shown = crate::config::contract(path, &roots.home);
+            if path.starts_with(&roots.home) {
+                assert!(
+                    shown.starts_with("~/") && shown != "~",
+                    "{shown} from {}",
+                    path.display(),
+                );
+            } else {
+                assert!(path.starts_with(&roots.system), "{}", path.display());
+                assert_eq!(shown, path.display().to_string());
+            }
+        }
+    }
+
+    #[test]
+    fn sacred_directories_are_refused_however_they_were_asked_for() {
+        let (_fixture, roots, guard) = fixture();
+
+        assert_eq!(
+            Guard::sacred(),
+            &[".ssh", ".gnupg", ".password-store", ".local/share/keyrings",]
+        );
+
+        for relative in Guard::sacred() {
+            let path = roots.home(relative);
+            assert_eq!(
+                guard.check_chosen(&path).unwrap_err(),
+                Refusal::Sacred(path.clone()),
+                "{relative}",
+            );
+            // A catalogued path there is not sacred by name: it is simply
+            // outside every boundary, which is also a refusal.
+            assert!(guard.check(&path).is_err(), "{relative}");
+        }
     }
 }
