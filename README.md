@@ -118,6 +118,14 @@ written, and a line that cannot be read costs only itself. Whatever went to
 the trash is recorded under the trash's own name for it, so it can be found
 there again even when the trash had to rename it.
 
+What went to the trash can be put back from the History page, or with
+`limpid-cli restore`. Limpid finds each thing by that record — the
+`.trashinfo`, where it came from, and when — and refuses if the trash no
+longer matches, or if anything now occupies the original path. A dry run
+is the default; `restore --apply` is what moves it. Putting something back
+is written down too, and the History page then shows it as put back, so it
+is not put back twice.
+
 ## Using it
 
 ```sh
@@ -131,6 +139,9 @@ limpid-cli storage                     # where the space went
 limpid-cli storage --path ~/Downloads
 limpid-cli history                     # what was removed, and where it went
 limpid-cli history --json
+limpid-cli restore                     # what the newest run would put back
+limpid-cli restore --apply             # put it back
+limpid-cli restore --at 1759660320000 --apply
 limpid-cli config                      # what Limpid remembers
 limpid-cli exclude ~/.cache/thumbnails # never offer or remove this
 limpid-cli exclude --remove ~/.cache/thumbnails
@@ -238,7 +249,11 @@ some capability for it:
   moment of removal, like everything else: a `Cargo.toml` deleted since the
   scan and the `target/` beside it is no longer build output.
 - **Every removal is written down**, by the part of Limpid that does the
-  removing rather than by whichever window asked for it.
+  removing rather than by whichever window asked for it. So is putting
+  something back.
+- **What was put in the trash can be put back, and only that.** Limpid
+  matches the trash's own record and refuses if it no longer agrees, or if
+  the original path is taken. It does not overwrite.
 - **An exclusion is a refusal, not a filter.** The scanners leave excluded
   paths out, and the executor refuses them too, so a selection made before
   the exclusion was added still cannot remove what was excluded.
@@ -254,7 +269,7 @@ PKGBUILD.
 | Release | What it adds |
 |---|---|
 | 0.4 | Settings and exclusions ✓ · project build artifacts ✓ · folders in the storage view ✓ · the first AUR release |
-| 0.5 | History of every run ✓ · undo from the trash · deleting folders for good · the safety rules on screen ✓ |
+| 0.5 | History of every run ✓ · undo from the trash ✓ · deleting folders for good · the safety rules on screen ✓ |
 | 0.6 | Duplicate files · large files nobody has opened in years |
 | 0.7 | Exact accounting: what a removal really frees on btrfs, and a check afterwards |
 | 0.8 | Reclaiming space without deleting anything: deduplication, recompression, snapshot thinning |

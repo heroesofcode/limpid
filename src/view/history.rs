@@ -1,17 +1,18 @@
-//! What Limpid removed, when, and where it went.
+//! What Limpid removed, when, and where it went — and putting it back.
 
 use std::path::Path;
 
 use iced::widget::text::Wrapping;
-use iced::widget::{Column, column, container, row, text};
+use iced::widget::{Column, Space, button, column, container, row, text};
 use iced::{Alignment, Element, Length};
 
 use limpid_core::config::contract;
 use limpid_core::history::{Entry, Read, Run};
+use limpid_core::restore::{self, Fate, Report};
 use limpid_core::size::human;
 use limpid_theme::Palette;
 
-use crate::app::{Message, State};
+use crate::app::{Message, Restore, State};
 use crate::layout::Metrics;
 use crate::style;
 use crate::typography as ty;
@@ -49,7 +50,10 @@ pub fn view<'a>(palette: Palette, metrics: Metrics, state: &'a State) -> Element
         page = page.push(nothing_yet(palette, metrics));
     }
     for run in read.runs.iter().take(RUNS_SHOWN) {
-        page = page.push(card(palette, metrics, run, home));
+        page = page.push(card(palette, metrics, run, read, home, state));
+        if let Some(banner) = alongside(palette, metrics, run.at, home, state) {
+            page = page.push(banner);
+        }
     }
     page.push(footer(palette, read, &state.history_path(), home))
         .into()
@@ -81,7 +85,14 @@ fn nothing_yet<'a>(palette: Palette, metrics: Metrics) -> Element<'a, Message> {
 }
 
 /// One run: when, how much and which way, then what.
-fn card<'a>(palette: Palette, metrics: Metrics, run: &'a Run, home: &Path) -> Element<'a, Message> {
+fn card<'a>(
+    palette: Palette,
+    metrics: Metrics,
+    run: &'a Run,
+    read: &'a Read,
+    home: &Path,
+    state: &'a State,
+) -> Element<'a, Message> {
     let mut body = column![
         text(run.when())
             .size(ty::SUBTITLE)
@@ -99,7 +110,13 @@ fn card<'a>(palette: Palette, metrics: Metrics, run: &'a Run, home: &Path) -> El
     // go the same way; otherwise the summary has said it.
     let mixed = run.disposal().is_none();
     for entry in run.entries.iter().take(ENTRIES_SHOWN) {
-        list = list.push(entry_row(palette, entry, home, mixed));
+        list = list.push(entry_row(
+            palette,
+            entry,
+            home,
+            mixed,
+            restored_note(entry, read),
+        ));
     }
     if run.entries.len() > ENTRIES_SHOWN {
         list = list.push(
@@ -107,6 +124,13 @@ fn card<'a>(palette: Palette, metrics: Metrics, run: &'a Run, home: &Path) -> El
                 .size(ty::CAPTION)
                 .style(style::secondary(palette)),
         );
+    }
+    for item in &run.restored {
+        list = list.push(line(
+            palette,
+            true,
+            format!("put back {}", contract(&item.original, home)),
+        ));
     }
     for done in &run.operations {
         list = list.push(line(
@@ -122,6 +146,31 @@ fn card<'a>(palette: Palette, metrics: Metrics, run: &'a Run, home: &Path) -> El
     body = body.push(iced::widget::Space::new().height(Length::Fixed(ty::GAP_TIGHT)));
     body = body.push(list);
 
+    // Offered on the run, not on each file: the confirmation lists every
+    // path, and a run is the unit the history is written in. Hidden while
+    // that confirmation is the thing on screen, so there are not two ways
+    // to start the same restore.
+    let pending = !run.pending(read).is_empty();
+    let engaged = matches!(
+        state.restore(),
+        Some(
+            Restore::Checking { at }
+                | Restore::Applying { at }
+                | Restore::Confirming(Report { at, .. })
+                | Restore::Done(Report { at, .. })
+                | Restore::Failed { at, .. }
+        ) if *at == run.at
+    );
+    if pending && !engaged {
+        body = body.push(Space::new().height(Length::Fixed(ty::GAP_TIGHT)));
+        body = body.push(
+            button(text("Put back").size(ty::BODY_SMALL))
+                .style(style::quiet_button(palette))
+                .padding([8, 14])
+                .on_press(Message::AskToRestore(run.at)),
+        );
+    }
+
     container(body)
         .style(style::card(palette))
         .padding(metrics.card)
@@ -135,6 +184,7 @@ fn entry_row<'a>(
     entry: &'a Entry,
     home: &Path,
     mixed: bool,
+    note: Option<&str>,
 ) -> Element<'a, Message> {
     // The name takes what the size leaves, and breaks anywhere: a file name
     // is one long token as often as not.
@@ -168,6 +218,10 @@ fn entry_row<'a>(
         under.push_str(" \u{b7} ");
         under.push_str(entry.disposal.describe());
     }
+    if let Some(note) = note {
+        under.push_str(" \u{b7} ");
+        under.push_str(note);
+    }
 
     said.push(
         text(under)
@@ -176,6 +230,241 @@ fn entry_row<'a>(
             .wrapping(Wrapping::WordOrGlyph)
             .width(Length::Fill),
     )
+    .into()
+}
+
+/// How much of an entry has already been put back, if any of it has.
+fn restored_note(entry: &Entry, read: &Read) -> Option<&'static str> {
+    if entry.trashed.is_empty() {
+        return None;
+    }
+    let restored = entry
+        .trashed
+        .iter()
+        .filter(|item| read.was_restored(item))
+        .count();
+    if restored == 0 {
+        None
+    } else if restored == entry.trashed.len() {
+        Some("put back")
+    } else {
+        Some("partly put back")
+    }
+}
+
+/// The confirmation or the result for this run, directly under its card.
+///
+/// Under the card rather than at the top of the page: the button that
+/// opened it may be a long way down a list, and a tiling window does not
+/// scroll there for us.
+fn alongside<'a>(
+    palette: Palette,
+    metrics: Metrics,
+    at: u64,
+    home: &Path,
+    state: &'a State,
+) -> Option<Element<'a, Message>> {
+    let phase = state.restore()?;
+    let same = match phase {
+        Restore::Checking { at: run }
+        | Restore::Applying { at: run }
+        | Restore::Failed { at: run, .. } => *run == at,
+        Restore::Confirming(report) | Restore::Done(report) => report.at == at,
+    };
+    if !same {
+        return None;
+    }
+    Some(match phase {
+        Restore::Checking { .. } => status(palette, metrics, "Checking the trash\u{2026}"),
+        Restore::Applying { .. } => status(palette, metrics, "Putting it back\u{2026}"),
+        Restore::Failed { why, .. } => view::failed(palette, metrics, why),
+        Restore::Confirming(report) => confirmation(palette, metrics, report, home),
+        Restore::Done(report) => outcome(palette, metrics, report, home),
+    })
+}
+
+fn status<'a>(palette: Palette, metrics: Metrics, said: &'a str) -> Element<'a, Message> {
+    container(
+        text(said)
+            .size(ty::BODY_SMALL)
+            .style(style::secondary(palette))
+            .width(Length::Fill),
+    )
+    .style(style::card(palette))
+    .padding(metrics.card)
+    .width(Length::Fill)
+    .into()
+}
+
+/// Exactly what would go back where, and what would be refused.
+fn confirmation<'a>(
+    palette: Palette,
+    metrics: Metrics,
+    report: &'a Report,
+    home: &Path,
+) -> Element<'a, Message> {
+    let ready = report
+        .attempts
+        .iter()
+        .filter(|attempt| matches!(attempt.fate, Fate::PutBack))
+        .count();
+    let title = match ready {
+        0 => "Nothing to put back".to_owned(),
+        1 => "Put this back?".to_owned(),
+        count => format!("Put {count} back?"),
+    };
+
+    let mut lines = column![].spacing(ty::GAP_TIGHT).width(Length::Fill);
+    for attempt in &report.attempts {
+        lines = lines.push(attempt_line(palette, attempt, home, false));
+    }
+
+    let stacked = !metrics.buttons_inline();
+    let cancel = view::action("Cancel", stacked)
+        .style(style::quiet_button(palette))
+        .padding([10, 18])
+        .on_press(Message::CancelRestore);
+    let put_back = view::action("Put back", stacked)
+        .style(style::primary_button(palette))
+        .padding([10, 22])
+        .on_press_maybe(report.puts_back().then_some(Message::ConfirmRestore));
+    // Cancel stays first either way, so the one that moves files is never
+    // where the safe one was a moment ago.
+    let actions: Element<'a, Message> = if metrics.buttons_inline() {
+        row![Space::new().width(Length::Fill), cancel, put_back]
+            .spacing(ty::GAP_TIGHT)
+            .into()
+    } else {
+        column![cancel, put_back]
+            .spacing(ty::GAP_TIGHT)
+            .width(Length::Fill)
+            .into()
+    };
+
+    container(
+        column![
+            text(title)
+                .size(ty::TITLE)
+                .style(style::heading(palette))
+                .width(Length::Fill),
+            text(
+                "Checked again when you confirm. Anything that is occupied, or that \
+                 is no longer the file that was sent, stays in the trash.",
+            )
+            .size(ty::BODY_SMALL)
+            .style(style::secondary(palette))
+            .width(Length::Fill),
+            Space::new().height(Length::Fixed(ty::GAP_TIGHT)),
+            lines,
+            Space::new().height(Length::Fixed(ty::GAP)),
+            actions,
+        ]
+        .spacing(4)
+        .width(Length::Fill),
+    )
+    .style(style::card(palette))
+    .padding(metrics.card)
+    .width(Length::Fill)
+    .into()
+}
+
+/// What was put back, and what was refused.
+fn outcome<'a>(
+    palette: Palette,
+    metrics: Metrics,
+    report: &'a Report,
+    home: &Path,
+) -> Element<'a, Message> {
+    let title = if report.puts_back() {
+        "Put back"
+    } else {
+        "Nothing put back"
+    };
+    let mut lines = column![].spacing(ty::GAP_TIGHT).width(Length::Fill);
+    for attempt in &report.attempts {
+        lines = lines.push(attempt_line(palette, attempt, home, true));
+    }
+    let mut body = column![
+        text(title)
+            .size(ty::TITLE)
+            .style(style::heading(palette))
+            .width(Length::Fill),
+        lines,
+    ]
+    .spacing(ty::GAP_TIGHT)
+    .width(Length::Fill);
+
+    for problem in &report.problems {
+        body = body.push(
+            text(problem.clone())
+                .size(ty::CAPTION)
+                .style(style::tinted(palette.orange))
+                .wrapping(Wrapping::WordOrGlyph)
+                .width(Length::Fill),
+        );
+    }
+    if let limpid_core::history::Recorded::Failed(why) = &report.recorded {
+        body = body.push(
+            text(format!(
+                "This was done, but not written to the history: {why}"
+            ))
+            .size(ty::CAPTION)
+            .style(style::tinted(palette.orange))
+            .wrapping(Wrapping::WordOrGlyph)
+            .width(Length::Fill),
+        );
+    }
+
+    container(body)
+        .style(style::card(palette))
+        .padding(metrics.card)
+        .width(Length::Fill)
+        .into()
+}
+
+/// One file in a confirmation or a result: its name, and where it goes.
+fn attempt_line<'a>(
+    palette: Palette,
+    attempt: &'a restore::Attempt,
+    home: &Path,
+    done: bool,
+) -> Element<'a, Message> {
+    let back = contract(&attempt.trashed.original, home);
+    let (detail, refused) = match &attempt.fate {
+        Fate::PutBack if done => (format!("back at {back}"), false),
+        Fate::PutBack => (format!("back to {back}"), false),
+        Fate::Refused(why) if done => {
+            (format!("stayed in the trash: {}", why.describe(home)), true)
+        }
+        Fate::Refused(why) => (format!("will not: {}", why.describe(home)), true),
+    };
+    // Converted to elements here. Each style function returns its own
+    // opaque type, so the two branches cannot share a `text` value.
+    let detail: Element<'a, Message> = if refused {
+        text(detail)
+            .size(ty::CAPTION)
+            .style(style::tinted(palette.red))
+            .wrapping(Wrapping::WordOrGlyph)
+            .width(Length::Fill)
+            .into()
+    } else {
+        text(detail)
+            .size(ty::CAPTION)
+            .style(style::secondary(palette))
+            .wrapping(Wrapping::WordOrGlyph)
+            .width(Length::Fill)
+            .into()
+    };
+    column![
+        text(attempt.name.as_str())
+            .size(ty::BODY_SMALL)
+            .style(style::body(palette))
+            .wrapping(Wrapping::WordOrGlyph)
+            .width(Length::Fill),
+        detail,
+    ]
+    .spacing(2)
+    .width(Length::Fill)
     .into()
 }
 

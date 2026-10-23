@@ -1,8 +1,9 @@
 //! What Limpid removed, when, and where it went.
 //!
 //! One file, `$XDG_STATE_HOME/limpid/history.jsonl`, with a line for every
-//! run that removed anything. It is what lets the trash be somewhere Limpid
-//! can give things back from, rather than only somewhere it sends them.
+//! run that removed anything and a line for every restore that put something
+//! back. It is what lets the trash be somewhere Limpid can give things back
+//! from, rather than only somewhere it sends them.
 //!
 //! **The executor writes it, not whoever called the executor.** An applying
 //! executor records its own runs, so no front-end can remove something and
@@ -18,6 +19,11 @@
 //! resolves the folder it came from, so the path that was ticked is not
 //! enough to find it again. Each thing that went is recorded with the
 //! trash's own record of it.
+//!
+//! **A restore is a new line, not an edit.** The line that sent something
+//! stays as it was written. A later line names what was put back, and that
+//! is how a record is known to have come back — rewriting the earlier line
+//! to say so would put every other run at risk for the sake of one.
 
 use std::collections::HashSet;
 use std::ffi::OsString;
@@ -41,9 +47,12 @@ pub const FILE: &str = "limpid/history.jsonl";
 ///
 /// A line with a higher version was written by a newer Limpid. It is left
 /// in the file and not shown, rather than shown wrong.
-pub const VERSION: u32 = 1;
+///
+/// Version 2 is the first that can record a restore. A line from version 1
+/// is still read: it is a removal, and nothing put back is an empty list.
+pub const VERSION: u32 = 2;
 
-/// One run that removed something.
+/// One run that removed something, or put something back.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Run {
     /// The format this line was written in.
@@ -60,6 +69,10 @@ pub struct Run {
     /// What could not be done, as it was reported at the time.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub problems: Vec<String>,
+    /// What this run put back from the trash. Empty for a removal: a restore
+    /// is its own line, so the line that sent something is never rewritten.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub restored: Vec<Trashed>,
 }
 
 impl Run {
@@ -89,6 +102,12 @@ impl Run {
     /// How much, in how many files, and which way it went: the line a run
     /// is listed under.
     pub fn summary(&self) -> String {
+        if self.entries.is_empty() && !self.restored.is_empty() {
+            return match self.restored.len() {
+                1 => "put 1 back from the trash".to_owned(),
+                count => format!("put {count} back from the trash"),
+            };
+        }
         if self.entries.is_empty() {
             return "by the privileged helper".to_owned();
         }
@@ -113,6 +132,15 @@ impl Run {
             .iter()
             .all(|entry| entry.disposal == first)
             .then_some(first)
+    }
+
+    /// What this run sent to the trash and a later run has not put back.
+    pub fn pending<'a>(&'a self, read: &'a Read) -> Vec<&'a Trashed> {
+        self.entries
+            .iter()
+            .flat_map(|entry| &entry.trashed)
+            .filter(|item| !read.was_restored(item))
+            .collect()
     }
 }
 
@@ -155,7 +183,7 @@ pub struct Trashed {
 /// Whether a run made it into the history.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum Recorded {
-    /// There was nothing to record: a dry run, or nothing was removed.
+    /// There was nothing to record: a dry run, or nothing was removed or put back.
     #[default]
     Nothing,
     /// Written down, under this run's `at`.
@@ -173,6 +201,19 @@ pub struct Read {
     /// Lines that could not be understood: damaged, or written by a newer
     /// Limpid. Left in the file as they are, and not shown.
     pub skipped: usize,
+}
+
+impl Read {
+    /// Whether some run has already put this record back.
+    ///
+    /// The comparison is the whole record — the `.trashinfo`, where it came
+    /// from, and when — because that is what makes it that thing and not
+    /// another file the trash happened to give the same name.
+    pub fn was_restored(&self, item: &Trashed) -> bool {
+        self.runs
+            .iter()
+            .any(|run| run.restored.iter().any(|restored| restored == item))
+    }
 }
 
 /// The history file.
@@ -290,6 +331,7 @@ impl History {
             entries,
             operations: Vec::new(),
             problems: problems.iter().map(ToString::to_string).collect(),
+            restored: Vec::new(),
         };
         match self.append(&run) {
             Ok(()) => Recorded::Run(at),
@@ -311,6 +353,7 @@ impl History {
             entries: Vec::new(),
             operations: report.completed.clone(),
             problems: Vec::new(),
+            restored: Vec::new(),
         };
         match self.append(&run) {
             Ok(()) => Recorded::Run(at),
@@ -482,6 +525,7 @@ mod tests {
             }],
             operations: Vec::new(),
             problems: Vec::new(),
+            restored: Vec::new(),
         }
     }
 
@@ -835,6 +879,66 @@ mod tests {
             "{}",
             mixed.summary()
         );
+    }
+
+    #[test]
+    fn a_run_written_before_restores_were_recorded_is_still_read() {
+        let (_fixture, history) = history();
+        std::fs::create_dir_all(history.path().parent().unwrap()).unwrap();
+        // Version 1 had no `restored`. Its absence is an empty list, not a
+        // line this build has to skip.
+        std::fs::write(
+            history.path(),
+            concat!(
+                r#"{"version":1,"at":1,"entries":[{"name":"a","path":"/home/x/a","disposal":"trash","size":{"apparent":1,"on_disk":1},"files":1}]}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        let read = history.read().unwrap();
+
+        assert_eq!(read.skipped, 0);
+        assert_eq!(read.runs.len(), 1);
+        assert!(read.runs[0].restored.is_empty());
+        assert_eq!(read.runs[0].entries[0].name, "a");
+    }
+
+    #[test]
+    fn a_restore_is_summed_up_as_putting_back() {
+        let mut putting_back = run(1, "a");
+        putting_back.entries.clear();
+        putting_back.restored.push(Trashed {
+            info: PathBuf::from("/t/info/a.trashinfo"),
+            original: PathBuf::from("/home/x/a"),
+            deleted: 1,
+        });
+
+        assert_eq!(putting_back.summary(), "put 1 back from the trash");
+        putting_back.restored.push(putting_back.restored[0].clone());
+        assert_eq!(putting_back.summary(), "put 2 back from the trash");
+    }
+
+    #[test]
+    fn a_later_line_is_what_marks_a_record_as_put_back() {
+        let item = Trashed {
+            info: PathBuf::from("/t/info/film.mkv.trashinfo"),
+            original: PathBuf::from("/home/x/film.mkv"),
+            deleted: 5,
+        };
+        let mut removal = run(1, "film.mkv");
+        removal.entries[0].trashed.push(item.clone());
+        let mut putting_back = run(2, "ignored");
+        putting_back.entries.clear();
+        putting_back.restored.push(item.clone());
+        let read = Read {
+            runs: vec![putting_back, removal],
+            skipped: 0,
+        };
+
+        assert!(read.was_restored(&item));
+        assert!(read.runs[1].pending(&read).is_empty());
+        assert_eq!(read.runs[0].pending(&read).len(), 0);
     }
 
     #[test]

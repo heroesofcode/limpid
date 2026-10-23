@@ -2,7 +2,9 @@
 //!
 //! Nothing in this crate touches the filesystem destructively on its own: a
 //! scan produces [`model::Target`]s, the caller assembles them into a plan,
-//! and only an executor acts on that plan.
+//! and only an executor acts on that plan. Putting something back is the
+//! same shape: a [`restore::Restorer`] has to be asked for, and the one
+//! that changes nothing is what you get unless you ask for the other.
 //!
 //! # Measuring
 //!
@@ -47,6 +49,7 @@ pub mod paths;
 pub mod plan;
 pub mod privileged;
 pub mod project;
+pub mod restore;
 pub mod size;
 pub mod volume;
 pub mod walk;

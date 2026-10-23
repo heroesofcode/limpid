@@ -201,10 +201,17 @@ lose something irreplaceable.
   the folder it came from. Verified against a real trash redirected to a
   fixture, in a child process, since the trash crate follows
   `XDG_DATA_HOME` and nothing else.
-- Undo for anything that went to the trash, from inside Limpid. The record
-  above is what it restores from: match the recorded `.trashinfo`, origin
-  and deletion time against the trash as it is then, and refuse rather
-  than overwrite when something now occupies the original path.
+- Undo for anything that went to the trash — **done**: `crate::restore`,
+  a Put back action on the History page, and `limpid-cli restore`. Dry
+  run unless `--apply`, or the confirmation, is what was asked for. Each
+  thing is found by the recorded `.trashinfo`, the original path and the
+  deletion time together, against the trash as it is at that moment; a
+  record that no longer matches, or an original path that is now taken,
+  is refused rather than overwritten. A symlink on the way back is a
+  refusal too, and so is anything outside the home directory. A restore
+  is its own line, appended, and the page then shows the entry as put
+  back so it cannot be put back twice. Verified against a trash
+  redirected through `XDG_DATA_HOME`, in a child process.
 - Permanent deletion of directories in the storage view, now that there is
   a record of it
 - Render `Guard::boundaries()` in Settings — **done**. The page lists those

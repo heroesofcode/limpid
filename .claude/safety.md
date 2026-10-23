@@ -258,6 +258,28 @@ cannot reach a path the guard has not seen, or run something the helper was
 not written to run. If the reason will not come, neither should the call.
 Test code is exempt; the library is still checked in its ordinary build.
 
+## 15. Putting something back never overwrites, and only what the record still names
+
+`restore::Restorer`. A dry run and an applying restore are separate
+constructors, as for the executor.
+
+What is put back is the trash entry the history recorded, matched by the
+`.trashinfo` path, the original path and the deletion time together,
+against the trash as it is at that moment. Any one of them differing is a
+different thing, and it is refused. So is a record the history already says
+was put back.
+
+The original path is checked the way a path about to be removed is:
+absolute, no `..`, no symlink along it, inside the home directory and not
+the home directory itself. It must also be absent. The move will not
+replace an existing name, so a file that appears in the gap is left where
+it is. The copy is only taken from a trash inside the home directory. The
+`.trashinfo` is removed only after the move has succeeded, and only that
+file.
+
+A restore is its own line in the history, appended. The line that sent
+something is never rewritten.
+
 ## Checklist for adding a scanner
 
 A scanner is a list of paths and an explanation. It must not know how to
