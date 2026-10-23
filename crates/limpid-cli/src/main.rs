@@ -21,6 +21,7 @@ use limpid_core::model::{Risk, Scan};
 use limpid_core::paths::{ROOT_OVERRIDE, Roots};
 use limpid_core::plan::{Magnitude, Plan, Selection};
 use limpid_core::privileged::{Report, Request, RunError, Runner};
+use limpid_core::restore::{self, Fate};
 use limpid_core::size::human;
 
 #[derive(Parser)]
@@ -103,6 +104,17 @@ enum Command {
         /// How many runs to show. 0 shows every one.
         #[arg(long, default_value_t = 20)]
         last: usize,
+    },
+    /// Put back what a run sent to the trash. Reports without changing
+    /// anything unless told to apply.
+    Restore {
+        /// The run, by the `at` printed next to it by `history`. Without
+        /// this, the newest run that still has something to put back.
+        #[arg(long)]
+        at: Option<u64>,
+        /// Actually put things back. Without this, nothing is touched.
+        #[arg(long)]
+        apply: bool,
     },
     /// Show the settings in force, and where they came from.
     Config,
@@ -271,6 +283,40 @@ fn main() -> Result<()> {
                     home: &context.roots.home,
                 };
                 report_history(&mut stdout, &shown, colour)
+            }
+        }
+        Command::Restore { at, apply } => {
+            let history = History::at(&context.roots);
+            let read = history.read().map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("cannot read {}: {error}", history.path().display()),
+                )
+            })?;
+            let Some(at) = at.or_else(|| {
+                read.runs
+                    .iter()
+                    .find(|run| !run.pending(&read).is_empty())
+                    .map(|run| run.at)
+            }) else {
+                println!("Nothing to put back.");
+                return Ok(());
+            };
+            let restorer = if apply {
+                restore::Restorer::applying(&context.roots)
+            } else {
+                restore::Restorer::dry_run(&context.roots)
+            };
+            match restorer.run(at) {
+                Ok(report) => {
+                    let colour = io::stdout().is_terminal();
+                    let mut stdout = io::stdout().lock();
+                    report_restore(&mut stdout, &report, &context.roots.home, colour)
+                }
+                Err(error) => {
+                    eprintln!("limpid: {error}");
+                    std::process::exit(1);
+                }
             }
         }
         Command::Config => {
@@ -652,7 +698,13 @@ fn report_history(out: &mut impl Write, listed: &Listed, colour: bool) -> io::Re
 
     let shown = if last == 0 { read.runs.len() } else { last };
     for run in read.runs.iter().take(shown) {
-        writeln!(out, "{}  {}", style.bold(&run.when()), run.summary())?;
+        writeln!(
+            out,
+            "{}  {}  {}",
+            style.bold(&run.when()),
+            style.dim(&format!("#{}", run.at)),
+            run.summary(),
+        )?;
 
         for entry in run.entries.iter().take(ENTRIES_SHOWN) {
             let shown = config::contract(&entry.path, home);
@@ -667,11 +719,23 @@ fn report_history(out: &mut impl Write, listed: &Listed, colour: bool) -> io::Re
             } else {
                 String::new()
             };
+            let note = match restored_note(entry, read) {
+                Some(note) => format!("  {}", style.dim(note)),
+                None => String::new(),
+            };
             writeln!(
                 out,
-                "  {:>9}  {}{path}{how}",
+                "  {:>9}  {}{path}{how}{note}",
                 human(entry.size.on_disk),
                 entry.name,
+            )?;
+        }
+        for item in &run.restored {
+            writeln!(
+                out,
+                "  {:>9}  {}",
+                style.paint("32", "back"),
+                config::contract(&item.original, home),
             )?;
         }
         if run.entries.len() > ENTRIES_SHOWN {
@@ -729,6 +793,79 @@ fn report_history(out: &mut impl Write, listed: &Listed, colour: bool) -> io::Re
         )?;
     }
 
+    Ok(())
+}
+
+/// How much of an entry has already been put back.
+fn restored_note(entry: &history::Entry, read: &history::Read) -> Option<&'static str> {
+    if entry.trashed.is_empty() {
+        return None;
+    }
+    let restored = entry
+        .trashed
+        .iter()
+        .filter(|item| read.was_restored(item))
+        .count();
+    if restored == 0 {
+        None
+    } else if restored == entry.trashed.len() {
+        Some("put back")
+    } else {
+        Some("partly put back")
+    }
+}
+
+/// Print what a restore did, or would do.
+fn report_restore(
+    out: &mut impl Write,
+    report: &restore::Report,
+    home: &Path,
+    colour: bool,
+) -> io::Result<()> {
+    let style = Style { enabled: colour };
+    let heading = if report.applied {
+        if report.puts_back() {
+            "Put back"
+        } else {
+            "Nothing put back"
+        }
+    } else if report.puts_back() {
+        "Would put back"
+    } else {
+        "Nothing to put back"
+    };
+    writeln!(
+        out,
+        "{heading}, from the run of {} ({}).",
+        report.when, report.at,
+    )?;
+
+    for attempt in &report.attempts {
+        let path = config::contract(&attempt.trashed.original, home);
+        let (mark, said) = match &attempt.fate {
+            Fate::PutBack if report.applied => (style.paint("32", "ok"), format!("back at {path}")),
+            Fate::PutBack => (style.paint("32", "ok"), format!("back to {path}")),
+            Fate::Refused(why) => (
+                style.paint("31", "no"),
+                format!("refused: {}", why.describe(home)),
+            ),
+        };
+        writeln!(out, "  {mark}  {}  {said}", attempt.name)?;
+    }
+
+    for problem in &report.problems {
+        writeln!(out, "{}", style.paint("33", problem))?;
+    }
+    if let Recorded::Failed(why) = &report.recorded {
+        writeln!(
+            out,
+            "{} this was done, but not written to the history: {why}",
+            style.paint("33", "not recorded"),
+        )?;
+    }
+    if !report.applied && report.puts_back() {
+        writeln!(out, "Nothing was changed; pass --apply to do it.")?;
+    }
     Ok(())
 }
 
@@ -1251,6 +1388,7 @@ mod tests {
             entries,
             operations: Vec::new(),
             problems: Vec::new(),
+            restored: Vec::new(),
         }
     }
 
@@ -1396,5 +1534,87 @@ mod tests {
             output.contains("not written to the history: disk full"),
             "{output}"
         );
+    }
+
+    #[test]
+    fn a_restore_preview_names_what_goes_back_and_what_is_refused() {
+        let report = restore::Report {
+            applied: false,
+            at: 7,
+            when: "5 Oct 2026, 19:55".to_owned(),
+            attempts: vec![
+                restore::Attempt {
+                    name: "film.mkv".to_owned(),
+                    trashed: history::Trashed {
+                        info: PathBuf::from("/home/x/.local/share/Trash/info/film.mkv.trashinfo"),
+                        original: PathBuf::from("/home/x/Videos/film.mkv"),
+                        deleted: 1,
+                    },
+                    fate: Fate::PutBack,
+                },
+                restore::Attempt {
+                    name: "notes.txt".to_owned(),
+                    trashed: history::Trashed {
+                        info: PathBuf::from("/home/x/.local/share/Trash/info/notes.txt.trashinfo"),
+                        original: PathBuf::from("/home/x/Documents/notes.txt"),
+                        deleted: 2,
+                    },
+                    fate: Fate::Refused(restore::Refusal::Occupied {
+                        path: PathBuf::from("/home/x/Documents/notes.txt"),
+                    }),
+                },
+            ],
+            recorded: Recorded::Nothing,
+            problems: Vec::new(),
+        };
+        let mut buffer = Vec::new();
+        report_restore(&mut buffer, &report, Path::new("/home/x"), false).unwrap();
+        let output = String::from_utf8(buffer).unwrap();
+
+        assert!(
+            output.contains("Would put back, from the run of 5 Oct 2026, 19:55 (7)."),
+            "{output}"
+        );
+        assert!(
+            output.contains("film.mkv  back to ~/Videos/film.mkv"),
+            "{output}"
+        );
+        assert!(
+            output.contains("notes.txt  refused: ~/Documents/notes.txt is occupied"),
+            "{output}"
+        );
+        assert!(output.contains("pass --apply"), "{output}");
+    }
+
+    #[test]
+    fn a_restored_entry_is_shown_as_put_back() {
+        let item = history::Trashed {
+            info: PathBuf::from("/home/x/.local/share/Trash/info/film.mkv.trashinfo"),
+            original: PathBuf::from("/home/x/Videos/film.mkv"),
+            deleted: 1,
+        };
+        let mut removal = run_of(
+            1,
+            vec![entry(
+                "film.mkv",
+                "/home/x/Videos/film.mkv",
+                Disposal::Trash,
+                4096,
+            )],
+        );
+        removal.entries[0].trashed.push(item.clone());
+        let mut putting_back = run_of(2, Vec::new());
+        putting_back.restored.push(item);
+        let read = history::Read {
+            runs: vec![putting_back, removal],
+            skipped: 0,
+        };
+
+        let output = render_history(&read, 20);
+
+        assert!(output.contains("#2"), "{output}");
+        assert!(output.contains("put 1 back from the trash"), "{output}");
+        assert!(output.contains("put back"), "{output}");
+        assert!(output.contains("~/Videos/film.mkv"), "{output}");
     }
 }

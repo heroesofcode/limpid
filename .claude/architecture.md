@@ -74,7 +74,8 @@ There is no excuse for a test that reads `$HOME`.
 | `plan` | `Plan`, `Disposal`, `Selection`. What the user agreed to. |
 | `guard` | The last check before anything is removed. See @.claude/safety.md. |
 | `execute` | Carrying out a plan. An applying executor writes every run to the history itself. |
-| `history` | What was removed, when, and where it went. One appended line per run in `$XDG_STATE_HOME/limpid/history.jsonl`, with the trash's own record of whatever went there. |
+| `history` | What was removed, when, and where it went. One appended line per run in `$XDG_STATE_HOME/limpid/history.jsonl`, with the trash's own record of whatever went there. A restore is a later line, not an edit. |
+| `restore` | Putting back what a recorded run sent to the trash. Matches the `.trashinfo`, the origin and the deletion time against the trash as it is then, and refuses rather than overwrite. |
 | `privileged` | The boundary types and the `Runner`. **No path crosses this.** |
 
 ## The application

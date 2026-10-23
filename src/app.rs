@@ -18,6 +18,7 @@ use limpid_core::plan::{Disposal, Magnitude, Plan, Selection};
 use limpid_core::privileged::{
     MAXIMUM_DAYS, MAXIMUM_KEEP, MINIMUM_DAYS, MINIMUM_KEEP, Report, Request, Runner,
 };
+use limpid_core::restore;
 use limpid_core::size::Size;
 use limpid_core::volume::{self, Capacity};
 use limpid_core::walk::WalkOptions;
@@ -60,7 +61,7 @@ impl Page {
         match self {
             Self::Overview => "What is taking up space, and what is safe to let go of",
             Self::Storage => "Where the space went, with no opinion about whether it should have",
-            Self::History => "What Limpid removed, how large it was, where it went, and when",
+            Self::History => "What Limpid removed, where it went, and what it has put back",
             Self::Settings => "What Limpid keeps, what it leaves alone, and how it looks",
         }
     }
@@ -341,6 +342,32 @@ impl Storage {
     }
 }
 
+/// Where a restore from the history page has got to.
+#[derive(Debug, Clone)]
+pub enum Restore {
+    /// Reading the trash before asking.
+    Checking {
+        /// The run, by its `at`.
+        at: u64,
+    },
+    /// Waiting for a yes, with what the dry run found.
+    Confirming(restore::Report),
+    /// Moving the files.
+    Applying {
+        /// The run, by its `at`.
+        at: u64,
+    },
+    /// What the move did.
+    Done(restore::Report),
+    /// The history or the trash could not be read.
+    Failed {
+        /// The run that was asked about.
+        at: u64,
+        /// Why it could not be considered.
+        why: String,
+    },
+}
+
 /// Everything the window shows.
 pub struct State {
     /// The colours in force, and where they came from.
@@ -371,6 +398,8 @@ pub struct State {
     config_error: Option<String>,
     /// The history, as last read. `None` until the page is first opened.
     history: Option<Result<history::Read, String>>,
+    /// A restore from the history page, if one is underway or just finished.
+    restore: Option<Restore>,
     /// What was just excluded from the overview.
     excluded: Option<Excluded>,
     /// The path being typed on the settings page.
@@ -441,6 +470,16 @@ pub enum Message {
     TrashEmptied(Box<Emptying>),
     /// The history was read.
     HistoryRead(Box<Result<history::Read, String>>),
+    /// Put back what a run sent to the trash, after a look at what that would do.
+    AskToRestore(u64),
+    /// The dry run of a restore finished.
+    RestorePreview(Box<Result<restore::Report, String>>),
+    /// The restore confirmation was dismissed.
+    CancelRestore,
+    /// The restore confirmation was accepted.
+    ConfirmRestore,
+    /// The restore finished.
+    Restored(Box<Result<restore::Report, String>>),
     /// Nothing happened worth reacting to.
     Nothing,
     /// Show a file in the desktop's file manager.
@@ -491,6 +530,7 @@ impl State {
             roots,
             config_error: None,
             history: None,
+            restore: None,
             excluded: None,
             draft: String::new(),
             scans: 0,
@@ -511,6 +551,11 @@ impl State {
     /// Where the history is kept.
     pub fn history_path(&self) -> PathBuf {
         History::at(&self.roots).path().to_owned()
+    }
+
+    /// A restore from this page, if one is underway or just finished.
+    pub fn restore(&self) -> Option<&Restore> {
+        self.restore.as_ref()
     }
 
     /// The colours in force.
@@ -711,6 +756,7 @@ impl State {
                 self.excluded = None;
                 self.storage.excluded = None;
                 self.config_error = None;
+                self.restore = None;
                 // Read again, so an edit made by hand while the window was
                 // open is what the page shows.
                 if page == Page::Settings {
@@ -740,6 +786,55 @@ impl State {
             Message::HistoryRead(read) => {
                 self.history = Some(*read);
                 Task::none()
+            }
+            Message::AskToRestore(at) => {
+                self.restore = Some(Restore::Checking { at });
+                start_restore(self.roots.clone(), at, false)
+            }
+            Message::RestorePreview(result) => {
+                let Some(Restore::Checking { at }) = self.restore else {
+                    return Task::none();
+                };
+                self.restore = Some(match *result {
+                    Ok(report) if report.at == at => Restore::Confirming(report),
+                    Ok(_) => Restore::Checking { at },
+                    Err(why) => Restore::Failed { at, why },
+                });
+                Task::none()
+            }
+            Message::CancelRestore => {
+                self.restore = None;
+                Task::none()
+            }
+            Message::ConfirmRestore => {
+                let Some(Restore::Confirming(report)) = &self.restore else {
+                    return Task::none();
+                };
+                if !report.puts_back() {
+                    return Task::none();
+                }
+                let at = report.at;
+                self.restore = Some(Restore::Applying { at });
+                start_restore(self.roots.clone(), at, true)
+            }
+            Message::Restored(result) => {
+                let Some(Restore::Applying { at }) = self.restore else {
+                    return Task::none();
+                };
+                match *result {
+                    Ok(report) if report.at == at => self.restore = Some(Restore::Done(report)),
+                    Ok(_) => return Task::none(),
+                    Err(why) => self.restore = Some(Restore::Failed { at, why }),
+                }
+                let history = History::at(&self.roots);
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || read_history(&history))
+                            .await
+                            .unwrap_or_else(|error| Err(error.to_string()))
+                    },
+                    |read| Message::HistoryRead(Box::new(read)),
+                )
             }
             Message::Explore(path) => {
                 // Cleared on every move. A selection that survived
@@ -1534,6 +1629,32 @@ pub fn selectable(target: &Target) -> bool {
         && (target.is_actionable() || target.privileged.is_some())
 }
 
+/// Look at a run's trash, on a blocking thread. A dry run draws the
+/// confirmation; applying is what moves the files.
+fn start_restore(roots: Roots, at: u64, apply: bool) -> Task<Message> {
+    Task::perform(
+        async move {
+            tokio::task::spawn_blocking(move || {
+                let result = if apply {
+                    restore::Restorer::applying(&roots).run(at)
+                } else {
+                    restore::Restorer::dry_run(&roots).run(at)
+                };
+                result.map_err(|error| error.to_string())
+            })
+            .await
+            .unwrap_or_else(|error| Err(error.to_string()))
+        },
+        move |result| {
+            if apply {
+                Message::Restored(Box::new(result))
+            } else {
+                Message::RestorePreview(Box::new(result))
+            }
+        },
+    )
+}
+
 /// The history, or a sentence saying why it could not be read.
 fn read_history(history: &History) -> Result<history::Read, String> {
     history.read().map_err(|error| {
@@ -1573,6 +1694,19 @@ mod tests {
             assert!(!page.title().is_empty());
             assert!(!page.subtitle().is_empty());
         }
+    }
+
+    #[test]
+    fn leaving_the_history_page_drops_an_unfinished_restore() {
+        let (mut state, _dir) = boot();
+        state.restore = Some(Restore::Failed {
+            at: 1,
+            why: "no".to_owned(),
+        });
+
+        let _ = state.update(Message::Navigate(Page::Settings));
+
+        assert!(state.restore().is_none());
     }
 
     #[test]
