@@ -11,6 +11,8 @@
 
 use std::sync::mpsc::{Receiver, channel};
 
+use futures_util::StreamExt;
+
 use crate::palette::Mode;
 
 /// Portal service coordinates.
@@ -26,18 +28,24 @@ const KEY: &str = "color-scheme";
 /// all of which are ordinary, and none of which are worth reporting as an
 /// error.
 pub fn preferred_mode() -> Option<Mode> {
-    let connection = zbus::blocking::Connection::session().ok()?;
-    let reply = connection
-        .call_method(
-            Some(DESTINATION),
-            PATH,
-            Some(INTERFACE),
-            "ReadOne",
-            &(NAMESPACE, KEY),
-        )
-        .ok()?;
-    let value: zbus::zvariant::OwnedValue = reply.body().deserialize().ok()?;
-    mode_from_scheme(u32::try_from(&value).ok()?)
+    // zbus has no blocking API since 6.0; one `block_on` around the whole
+    // exchange is its replacement, and this runs once, at start-up.
+    let scheme = zbus::block_on(async {
+        let connection = zbus::Connection::session().await.ok()?;
+        let reply = connection
+            .call_method(
+                Some(DESTINATION),
+                PATH,
+                Some(INTERFACE),
+                "ReadOne",
+                &(NAMESPACE, KEY),
+            )
+            .await
+            .ok()?;
+        let value: zbus::OwnedVariant = reply.body().deserialize().ok()?;
+        u32::try_from(&value).ok()
+    })?;
+    mode_from_scheme(scheme)
 }
 
 /// Map the portal's enumeration onto a mode.
@@ -73,40 +81,49 @@ impl Watcher {
 /// Fails when there is no session bus to watch, which is the case in CI and
 /// on a headless machine.
 pub fn watch() -> zbus::Result<Watcher> {
-    let connection = zbus::blocking::Connection::session()?;
     let (tx, rx) = channel();
 
-    let rule = zbus::MatchRule::builder()
-        .msg_type(zbus::message::Type::Signal)
-        .interface(INTERFACE)?
-        .member("SettingChanged")?
-        .build();
-    let iterator = zbus::blocking::MessageIterator::for_match_rule(rule, &connection, None)?;
+    // Subscribe before the thread starts, so that a missing session bus is
+    // reported to the caller rather than ending a thread nobody watches.
+    let mut stream = zbus::block_on(async {
+        let connection = zbus::Connection::session().await?;
+        let rule = zbus::MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .interface(INTERFACE)
+            .member("SettingChanged")
+            .build()?;
+        zbus::MessageStream::for_match_rule(rule, &connection, None).await
+    })?;
 
     std::thread::Builder::new()
         .name("limpid-appearance-watch".to_owned())
         .spawn(move || {
-            for message in iterator.flatten() {
-                // The body has to outlive the deserialised value, which
-                // borrows from it.
-                let body = message.body();
-                let Ok((namespace, key, value)) =
-                    body.deserialize::<(String, String, zbus::zvariant::Value<'_>)>()
-                else {
-                    continue;
-                };
-                if namespace != NAMESPACE || key != KEY {
-                    continue;
+            zbus::block_on(async move {
+                while let Some(message) = stream.next().await {
+                    let Ok(message) = message else {
+                        continue;
+                    };
+                    // The body has to outlive the deserialised value, which
+                    // borrows from it.
+                    let body = message.body();
+                    let Ok((namespace, key, value)) =
+                        body.deserialize::<(String, String, zbus::Variant<'_>)>()
+                    else {
+                        continue;
+                    };
+                    if namespace != NAMESPACE || key != KEY {
+                        continue;
+                    }
+                    let Ok(scheme) = u32::try_from(&value) else {
+                        continue;
+                    };
+                    if let Some(mode) = mode_from_scheme(scheme)
+                        && tx.send(mode).is_err()
+                    {
+                        break;
+                    }
                 }
-                let Ok(scheme) = u32::try_from(&value) else {
-                    continue;
-                };
-                if let Some(mode) = mode_from_scheme(scheme)
-                    && tx.send(mode).is_err()
-                {
-                    break;
-                }
-            }
+            });
         })
         .map_err(|error| zbus::Error::InputOutput(error.into()))?;
 
