@@ -26,8 +26,8 @@ tracing.workspace = true
 tracing-subscriber.workspace = true
 
 tokio ={ version = "1", features = ["rt", "time"] }
-zbus = "5.11"
-iced = { version = "0.14", features = ["canvas", "tokio", "svg", "advanced"] }
+zbus = "6.1"
+iced = { version = "0.14", default-features = false, features = ["wgpu", "tiny-skia", "crisp", "web-colors", "thread-pool", "x11", "wayland", "canvas", "tokio", "svg", "advanced"] }
 
 [dev-dependencies]
 tempfile = "3.24"
@@ -44,9 +44,10 @@ members = [
 [workspace.package]
 edition = "2024"
 # The oldest compiler the dependency tree builds with, not the oldest that
-# understands edition 2024: Iced 0.14 and wgpu 27 need 1.88. CI checks this
-# with that exact toolchain, so it cannot drift back into a promise.
-rust-version = "1.88"
+# understands edition 2024: zbus 6 needs 1.89 (Iced 0.14 and wgpu 27 need
+# 1.88). CI checks this with that exact toolchain, so it cannot drift back
+# into a promise.
+rust-version = "1.89"
 # Nothing here goes to crates.io. Saying so stops an accidental
 # `cargo publish`, and is what lets cargo-deny accept the path dependencies
 # between these crates without a version.

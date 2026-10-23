@@ -37,15 +37,22 @@ pub fn in_file_manager(path: &Path) {
 fn show_and_select(path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let uri = format!("file://{}", path.display());
 
-    let connection = zbus::blocking::Connection::session()?;
-    connection.call_method(
-        Some("org.freedesktop.FileManager1"),
-        "/org/freedesktop/FileManager1",
-        Some("org.freedesktop.FileManager1"),
-        "ShowItems",
-        // The second argument is a startup id, which we do not have.
-        &(vec![uri], ""),
-    )?;
+    // zbus has no blocking API since 6.0; one `block_on` around the call is
+    // its replacement, and this already runs off the frame loop.
+    zbus::block_on(async {
+        let connection = zbus::Connection::session().await?;
+        connection
+            .call_method(
+                Some("org.freedesktop.FileManager1"),
+                "/org/freedesktop/FileManager1",
+                Some("org.freedesktop.FileManager1"),
+                "ShowItems",
+                // The second argument is a startup id, which we do not have.
+                &(vec![uri], ""),
+            )
+            .await?;
+        Ok::<(), zbus::Error>(())
+    })?;
 
     Ok(())
 }
