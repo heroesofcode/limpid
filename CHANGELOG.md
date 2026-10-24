@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.5.0](https://github.com/heroesofcode/limpid/compare/v0.4.0...v0.5.0) (2026-10-24)
+
+
+### Features
+
+* put back what a run sent to the trash ([18e8753](https://github.com/heroesofcode/limpid/commit/18e87532b9acd0cb266b8b793272fac453144720))
+
+
+### Bug fixes
+
+* clear the supply-chain advisories on tokio and the zbus wire crates ([d5ff7c8](https://github.com/heroesofcode/limpid/commit/d5ff7c80098f33f05ff3130326713c81c6b75ff0))
+* let one restore finish before another starts, and keep its outcome ([93bc4bf](https://github.com/heroesofcode/limpid/commit/93bc4bfc75aae9b210cba0bf937d16eff1145254))
+
 ## [0.4.0](https://github.com/heroesofcode/limpid/compare/v0.3.0...v0.4.0) (2026-10-17)
 
 
