@@ -1706,7 +1706,7 @@ dependencies = [
 
 [[package]]
 name = "limpid"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "iced",
  "limpid-core",
@@ -1720,7 +1720,7 @@ dependencies = [
 
 [[package]]
 name = "limpid-cli"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1732,7 +1732,7 @@ dependencies = [
 
 [[package]]
 name = "limpid-core"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "chrono",
  "dirs",
@@ -1750,7 +1750,7 @@ dependencies = [
 
 [[package]]
 name = "limpid-helper"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "limpid-core",
  "serde_json",
@@ -1759,7 +1759,7 @@ dependencies = [
 
 [[package]]
 name = "limpid-theme"
-version = "0.4.0"
+version = "0.5.0"
 dependencies = [
  "dirs",
  "futures-util",
