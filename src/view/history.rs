@@ -147,21 +147,22 @@ fn card<'a>(
     body = body.push(list);
 
     // Offered on the run, not on each file: the confirmation lists every
-    // path, and a run is the unit the history is written in. Hidden while
-    // that confirmation is the thing on screen, so there are not two ways
-    // to start the same restore.
+    // path, and a run is the unit the history is written in. Hidden on
+    // this run while its confirmation, result or failure is up, so there
+    // are not two ways to start the same restore. Hidden on every run
+    // while a check or an apply is in flight: a second Put back would
+    // replace the one whose result has not arrived.
     let pending = !run.pending(read).is_empty();
+    let in_flight = state.restore().is_some_and(Restore::in_flight);
     let engaged = matches!(
         state.restore(),
         Some(
-            Restore::Checking { at }
-                | Restore::Applying { at }
-                | Restore::Confirming(Report { at, .. })
+            Restore::Confirming(Report { at, .. })
                 | Restore::Done(Report { at, .. })
                 | Restore::Failed { at, .. }
         ) if *at == run.at
     );
-    if pending && !engaged {
+    if pending && !in_flight && !engaged {
         body = body.push(Space::new().height(Length::Fixed(ty::GAP_TIGHT)));
         body = body.push(
             button(text("Put back").size(ty::BODY_SMALL))

@@ -368,6 +368,20 @@ pub enum Restore {
     },
 }
 
+impl Restore {
+    /// Whether a result for this restore is still on its way.
+    ///
+    /// A check and an apply both have one. Starting another restore then
+    /// replaces this one, and the result already in flight — a warning
+    /// that the files came back with no history line included — is dropped
+    /// or written onto the run that was asked about next. The history page
+    /// hides every Put back while this is true; the update refuses the
+    /// message as well, because the button is not the only way it arrives.
+    pub fn in_flight(&self) -> bool {
+        matches!(self, Self::Checking { .. } | Self::Applying { .. })
+    }
+}
+
 /// Everything the window shows.
 pub struct State {
     /// The colours in force, and where they came from.
@@ -473,13 +487,23 @@ pub enum Message {
     /// Put back what a run sent to the trash, after a look at what that would do.
     AskToRestore(u64),
     /// The dry run of a restore finished.
-    RestorePreview(Box<Result<restore::Report, String>>),
+    ///
+    /// The run is on the message. A failure is only a string, so without
+    /// it the error was applied to whichever restore was current, and the
+    /// result that belonged there was ignored. A message whose run is not
+    /// the one being checked is dropped.
+    RestorePreview(u64, Box<Result<restore::Report, String>>),
     /// The restore confirmation was dismissed.
     CancelRestore,
     /// The restore confirmation was accepted.
     ConfirmRestore,
     /// The restore finished.
-    Restored(Box<Result<restore::Report, String>>),
+    ///
+    /// Carries the run it was started for, for the same reason as
+    /// [`Message::RestorePreview`]. The outcome of the run that is
+    /// applying — including one whose history line failed to write — is
+    /// kept. A result for any other run is left untouched.
+    Restored(u64, Box<Result<restore::Report, String>>),
     /// Nothing happened worth reacting to.
     Nothing,
     /// Show a file in the desktop's file manager.
@@ -756,7 +780,13 @@ impl State {
                 self.excluded = None;
                 self.storage.excluded = None;
                 self.config_error = None;
-                self.restore = None;
+                // A finished, failed or unconfirmed restore is a notice like
+                // the others. One still in flight is not: dropping it here
+                // would throw its outcome away when it lands, and let a
+                // second restore start beside it.
+                if !self.restore.as_ref().is_some_and(Restore::in_flight) {
+                    self.restore = None;
+                }
                 // Read again, so an edit made by hand while the window was
                 // open is what the page shows.
                 if page == Page::Settings {
@@ -788,18 +818,32 @@ impl State {
                 Task::none()
             }
             Message::AskToRestore(at) => {
+                // See `Restore::in_flight`: replacing a check or an apply
+                // drops the result that is already on its way.
+                if self.restore.as_ref().is_some_and(Restore::in_flight) {
+                    return Task::none();
+                }
                 self.restore = Some(Restore::Checking { at });
                 start_restore(self.roots.clone(), at, false)
             }
-            Message::RestorePreview(result) => {
-                let Some(Restore::Checking { at }) = self.restore else {
+            Message::RestorePreview(at, result) => {
+                // Only the check that is current may take this. A stale
+                // failure must not mark a different run, and must not
+                // stand in for the preview that run is still waiting on.
+                if !matches!(self.restore, Some(Restore::Checking { at: current }) if current == at)
+                {
                     return Task::none();
-                };
-                self.restore = Some(match *result {
-                    Ok(report) if report.at == at => Restore::Confirming(report),
-                    Ok(_) => Restore::Checking { at },
-                    Err(why) => Restore::Failed { at, why },
-                });
+                }
+                match *result {
+                    Ok(report) if report.at == at => {
+                        self.restore = Some(Restore::Confirming(report));
+                    }
+                    // The message names this run, but the report is for
+                    // another. Leave the check in flight so the real
+                    // preview is still the one recorded.
+                    Ok(_) => return Task::none(),
+                    Err(why) => self.restore = Some(Restore::Failed { at, why }),
+                }
                 Task::none()
             }
             Message::CancelRestore => {
@@ -817,10 +861,15 @@ impl State {
                 self.restore = Some(Restore::Applying { at });
                 start_restore(self.roots.clone(), at, true)
             }
-            Message::Restored(result) => {
-                let Some(Restore::Applying { at }) = self.restore else {
+            Message::Restored(at, result) => {
+                // Same rule as the preview: the run on the message has to
+                // be the one applying. Otherwise a late result is either
+                // thrown away — a `Recorded::Failed` warning with it — or
+                // painted onto the wrong run.
+                if !matches!(self.restore, Some(Restore::Applying { at: current }) if current == at)
+                {
                     return Task::none();
-                };
+                }
                 match *result {
                     Ok(report) if report.at == at => self.restore = Some(Restore::Done(report)),
                     Ok(_) => return Task::none(),
@@ -1646,10 +1695,12 @@ fn start_restore(roots: Roots, at: u64, apply: bool) -> Task<Message> {
             .unwrap_or_else(|error| Err(error.to_string()))
         },
         move |result| {
+            // `at` is copied onto the message so a result can be told
+            // apart from one that was started for a different run.
             if apply {
-                Message::Restored(Box::new(result))
+                Message::Restored(at, Box::new(result))
             } else {
-                Message::RestorePreview(Box::new(result))
+                Message::RestorePreview(at, Box::new(result))
             }
         },
     )
@@ -1707,6 +1758,133 @@ mod tests {
         let _ = state.update(Message::Navigate(Page::Settings));
 
         assert!(state.restore().is_none());
+    }
+
+    #[test]
+    fn leaving_the_history_page_keeps_a_restore_that_is_still_applying() {
+        let (mut state, _dir) = boot();
+        state.restore = Some(Restore::Applying { at: 1 });
+
+        let _ = state.update(Message::Navigate(Page::Settings));
+        assert!(matches!(state.restore(), Some(Restore::Applying { at: 1 })));
+
+        let own = restore_report(1, history::Recorded::Failed("disk full".to_owned()));
+        let _ = state.update(Message::Restored(1, Box::new(Ok(own))));
+        assert!(matches!(state.restore(), Some(Restore::Done(_))));
+    }
+
+    /// A report the restore messages can carry. The fields the tests do
+    /// not assert on are empty on purpose.
+    fn restore_report(at: u64, recorded: history::Recorded) -> restore::Report {
+        restore::Report {
+            applied: true,
+            at,
+            when: String::new(),
+            attempts: Vec::new(),
+            recorded,
+            problems: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_second_put_back_is_refused_while_one_is_in_flight() {
+        let (mut state, _dir) = boot();
+
+        state.restore = Some(Restore::Checking { at: 7 });
+        let _ = state.update(Message::AskToRestore(8));
+        assert!(
+            matches!(state.restore(), Some(Restore::Checking { at: 7 })),
+            "a put back during a check must leave that check in place"
+        );
+
+        state.restore = Some(Restore::Applying { at: 7 });
+        let _ = state.update(Message::AskToRestore(7));
+        assert!(
+            matches!(state.restore(), Some(Restore::Applying { at: 7 })),
+            "a put back during an apply must leave that apply in place"
+        );
+    }
+
+    #[test]
+    fn a_restore_result_for_a_different_run_is_ignored() {
+        let (mut state, _dir) = boot();
+        let foreign = restore_report(2, history::Recorded::Failed("disk full".to_owned()));
+
+        state.restore = Some(Restore::Applying { at: 1 });
+        let _ = state.update(Message::Restored(2, Box::new(Ok(foreign))));
+        assert!(
+            matches!(state.restore(), Some(Restore::Applying { at: 1 })),
+            "a result for another run must not replace the one applying"
+        );
+
+        state.restore = Some(Restore::Checking { at: 1 });
+        let _ = state.update(Message::RestorePreview(
+            3,
+            Box::new(Ok(restore_report(3, history::Recorded::Nothing))),
+        ));
+        assert!(
+            matches!(state.restore(), Some(Restore::Checking { at: 1 })),
+            "a preview for another run must not replace the one being checked"
+        );
+
+        // The run that is actually applying still receives its outcome,
+        // including the warning that the files came back with no history line.
+        let own = restore_report(1, history::Recorded::Failed("disk full".to_owned()));
+        state.restore = Some(Restore::Applying { at: 1 });
+        let _ = state.update(Message::Restored(1, Box::new(Ok(own))));
+        match state.restore() {
+            Some(Restore::Done(report)) => {
+                assert_eq!(report.at, 1);
+                assert_eq!(
+                    report.recorded,
+                    history::Recorded::Failed("disk full".to_owned())
+                );
+            }
+            other => panic!("the matching outcome should be kept, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_restore_failure_is_attributed_to_its_own_run() {
+        let (mut state, _dir) = boot();
+
+        state.restore = Some(Restore::Checking { at: 1 });
+        let _ = state.update(Message::RestorePreview(
+            2,
+            Box::new(Err("cannot read the history".to_owned())),
+        ));
+        assert!(
+            matches!(state.restore(), Some(Restore::Checking { at: 1 })),
+            "a preview failure for another run must not mark this one"
+        );
+
+        let _ = state.update(Message::RestorePreview(
+            1,
+            Box::new(Err("cannot read the history".to_owned())),
+        ));
+        assert!(matches!(
+            state.restore(),
+            Some(Restore::Failed { at: 1, why }) if why == "cannot read the history"
+        ));
+
+        state.restore = Some(Restore::Applying { at: 4 });
+        let _ = state.update(Message::Restored(
+            9,
+            Box::new(Err("there is no run recorded at 9".to_owned())),
+        ));
+        assert!(
+            matches!(state.restore(), Some(Restore::Applying { at: 4 })),
+            "an apply failure for another run must not mark this one"
+        );
+
+        let _ = state.update(Message::Restored(
+            4,
+            Box::new(Err("there is no run recorded at 4".to_owned())),
+        ));
+        assert!(matches!(
+            state.restore(),
+            Some(Restore::Failed { at: 4, why }) if why == "there is no run recorded at 4"
+        ));
     }
 
     #[test]
